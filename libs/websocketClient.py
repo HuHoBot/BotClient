@@ -4,6 +4,7 @@ import uuid
 import asyncio
 from libs.basic import *
 from ymbotpy import logging
+import ssl
 
 logger = logging.get_logger()    #Botpy Logger
 
@@ -27,6 +28,9 @@ class BotClientSendEvent:
     def __init__(self):
         self.sendMsgByServerId = "BotClient.sendMsgByServerId"
         self.queryClientList = "BotClient.queryClientList"
+        self.shakeHand = "BotClient.shakeHand"
+        self.queryState = "BotClient.queryStatus"
+        self.heart = "BotClient.heart"
 
 class BotClientRecvEvent:
     def __init__(self):
@@ -52,7 +56,14 @@ class WebsocketClient:
 
     async def connect(self):
         try:
-            self.ws = await websockets.connect(self.uri)
+            ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS)
+            ssl_context.check_hostname = False
+            ssl_context.verify_mode = ssl.CERT_NONE
+
+            if not self.uri.startswith("wss://"):
+                ssl_context = None
+
+            self.ws = await websockets.connect(self.uri, ssl=ssl_context)
             logger.info("Connected to the server")
             await self._sendShakeHand()
             # 启动监听任务
@@ -144,7 +155,7 @@ class WebsocketClient:
 
     async def _sendShakeHand(self):
         await self._sendMsg(
-            "shakeHand",
+            botClientSendEvent.shakeHand,
             {
                 "serverId": "BotClient",
                 "hashKey": self.wsKey,
@@ -175,7 +186,7 @@ class WebsocketClient:
             await asyncio.sleep(5)
             if self.ws is not None:
                 try:
-                    await self._sendMsg("heart", {})
+                    await self._sendMsg(botClientSendEvent.heart, {})
                 except websockets.exceptions.ConnectionClosed:
                     logger.warning("Connection closed while sending heartbeat")
                     await self.reconnect()

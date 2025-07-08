@@ -31,25 +31,36 @@ class ServerManager:
     
 serverManager = ServerManager()
 
-@Commands("帮助")
-async def getHelp(api: BotAPI, message: GroupMessage, params=None):
+async def postImages(api: BotAPI, message: GroupMessage, imgUrl:str,text:str = "",failedText:str = "图片发送失败"):
     try:
         uploadMedia = await api.post_group_file(
             message.group_openid,
             1,
-            "https://pic.txssb.cn/commandHelp.jpeg",
+            imgUrl,
             False
         )
         await api.post_group_message(
             group_openid=message.group_openid,
             msg_type=7,
             msg_id=message.id,
-            content=f"HuHoBot 指令列表如图，更多详情请前往文档站查看",
+            content=text,
             media=uploadMedia,
             msg_seq=1
         )
     except:
-        await message.reply(content=f"HuHoBot 指令列表图片发送失败，请前往文档站查看")
+        await message.reply(content=failedText)
+
+@Commands("帮助")
+async def getHelp(api: BotAPI, message: GroupMessage, params=None):
+    if (not params) or ("文档" in params):
+        await postImages(api,message,"https://pic.txssb.cn/docQrCode.png","HuHoBot 文档站请扫描二维码或手动输入网址",'图片发送失败，请稍后再试.')
+    elif "管理" in params:
+        await postImages(api,message,"https://pic.txssb.cn/adminHelp.jpeg","HuHoBot 管理帮助如图，更多详情请前往文档站查看",'图片发送失败，请使用"/帮助 文档"获取文档链接')
+    elif "指令" in params:
+        await postImages(api,message,"https://pic.txssb.cn/commandHelp.jpeg","HuHoBot 指令列表如图，更多详情请前往文档站查看",'图片发送失败，请使用"/帮助 文档"获取文档链接')
+    elif "快速开始" in params:
+        await postImages(api,message,"https://pic.txssb.cn/quickStartQrCode.png","HuHoBot 文档站快速开始请扫描二维码或手动输入网址",'图片发送失败，请稍后再试.')
+
     return True
 
 @Commands("添加白名单")
@@ -154,18 +165,11 @@ async def bind(api: BotAPI, message: GroupMessage, params=None):
         else:
             await message.reply(content=f"无法向Id为{serverId}的服务器下发绑定请求，请管理员检查连接状态")
     else:
-        await message.reply(content=f"你发送的内容不是一个合法的绑定Key，请重新确认（绑定Key应为32个字符长度的十六进制字符串）")
+        await postImages(api,message,"https://pic.txssb.cn/quickStartQrCode.png",
+                         "你发送的内容不是一个合法的绑定Key，请重新确认（绑定Key应为32个字符长度的十六进制字符串）\n详情请查看文档中的快速开始，扫描二维码查看",
+                         "你发送的内容不是一个合法的绑定Key，请重新确认（绑定Key应为32个字符长度的十六进制字符串）\n详情请查看文档中的快速开始(请使用 /帮助 来获取文档)")
     return True
 
-@Commands("管理帮助")
-async def adminHelp(api: BotAPI, message: GroupMessage, params=None):
-    adminRet = await queryIsAdmin(message.group_openid,message.author.member_openid)
-    if(not adminRet):
-        await message.reply(content="你没有足够的权限.")
-        return True
-    
-    await message.reply(content="管理员帮助：\n/查信息-查询自己的信息\n/查管理 {openid}-查询此人是否有管理\n/加管理 {openid}-为本群添加该管理\n/删管理 {openid}-为本群删除该管理")
-    return True
 
 @Commands("查信息")
 async def queryInfo(api: BotAPI, message: GroupMessage, params=None):
@@ -623,7 +627,7 @@ async def authQQAvatar(api: BotAPI, message: GroupMessage, params=None):
                 similarity_percent = similarity * 100  # 转换为百分数
                 epsilon = Decimal('0.00001')
 
-                if abs(similarity - threshold) < epsilon or similarity > threshold:
+                if abs(similarity - threshold) <= epsilon or similarity >= threshold:
                     # 显示两位小数（99.99% 格式）
                     await message.reply(content=f'✅ 认证通过！绑定信息如下\nOpenId:{openId}\nQQ账号:{qqNum}\n如绑定有误，请管理员输入"/解除认证 {openId}"')
                     await addBindQQ(message.group_openid, openId, qqNum)
@@ -677,7 +681,6 @@ class BaseBotMixin:
             queryClientList,
             adminRunCommand,
             runCommand,
-            adminHelp,
             queryInfo,
             queryAdminCmd,
             addAdminCmd,
@@ -700,7 +703,7 @@ class BaseBotMixin:
         if match:
             command = match.group(1)
             params = match.group(2) or ""
-            _log.info(f"cmd:{command+' '+params.strip()}")
+            #_log.info(f"cmd:{command+' '+params.strip()}")
             await customRun(adminRet, self.bot_api, message, command+' '+params.strip())
             
         #无消息
@@ -709,13 +712,29 @@ class BaseBotMixin:
             _log.warning(f"消息：{message.audit_id} 审核未通过.")
 
     async def on_group_add_robot(self, event: GroupManageEvent):
-        _log.info("机器人被添加到群聊：" + event.group_openid)
-        await self.bot_api.post_group_message(
-            group_openid=event.group_openid,
-            msg_type=0,
-            event_id=event.event_id,
-            content=f"欢迎使用HuHoBot，首次使用请根据文档进行配置\n操作过程中需要@我，如:@HuHoBot /绑定 xxx\n欢迎加入交流群：1005746321",
-        )
+        try:
+            uploadMedia = await self.bot_api.post_group_file(
+                event.group_openid,
+                1,
+                "https://pic.txssb.cn/docQrCode.png",
+                False
+            )
+            await self.bot_api.post_group_message(
+                group_openid=event.group_openid,
+                msg_type=7,
+                #msg_id=message.id,
+                event_id=event.event_id,
+                content=f"欢迎使用HuHoBot，首次使用请根据文档中的快速开始进行配置，文档可扫描上方二维码或手动输入网址.\n操作过程中需要@我，如:@HuHoBot /绑定 xxx\n欢迎加入交流群：1005746321",
+                media=uploadMedia,
+                msg_seq=1
+            )
+        except:
+            await self.bot_api.post_group_message(
+                group_openid=event.group_openid,
+                msg_type=0,
+                event_id=event.event_id,
+                content=f'欢迎使用HuHoBot，首次使用请根据文档中的快速开始进行配置,(图片发送失败,请稍后使用"@HuHoBot /帮助"进行查询)\n操作过程中需要@我，如:@HuHoBot /绑定 xxx\n欢迎加入交流群：1005746321',
+            )
 
     async def on_interaction_create(self, interaction: Interaction):
         #_log.info(interact
@@ -746,12 +765,20 @@ async def startClient(APPID:str, SECRET:str, SANDBOX:bool, WEBHOOK:bool):
 
     if WEBHOOK:
         client = ClientClass(is_sandbox=SANDBOX)
+        ssl_keyfile = None
+        ssl_certfile = None
+        if os.path.exists('ssl/private.key') and os.path.exists('ssl/public.crt'):
+            ssl_keyfile = 'ssl/private.key'
+            ssl_certfile = 'ssl/public.crt'
+            _log.info("使用SSL证书")
+
         await client.start(
             appid=APPID,
             secret=SECRET,
-            port=8080,
-            system_log=False
-
+            port=8443,
+            system_log=False,
+            ssl_certfile=ssl_certfile,
+            ssl_keyfile=ssl_keyfile,
         )
     else:
         client = ClientClass(is_sandbox=SANDBOX)
@@ -763,7 +790,7 @@ async def startClient(APPID:str, SECRET:str, SANDBOX:bool, WEBHOOK:bool):
 
 # 创建服务器实例的协程
 async def create_server(wskey: str):
-    server_instance = WebsocketClient("HuHoBot",'ws://127.0.0.1:8888',wskey)
+    server_instance = WebsocketClient("HuHoBot",'ws://127.0.0.1:2087',wskey)
     serverManager.setWsServer(server_instance)
     return server_instance
 
