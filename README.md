@@ -55,21 +55,41 @@ pip install -r requirements.txt
 python index.py
 ```
 
+### 启动帮助
+```commandline
+python index.py --help
+```
+
 ## 配置说明
 
 ### 核心配置
-```env
-# config.py
-APPID = ""        # QQ机器人应用ID
-SECRET = "" # QQ机器人应用密钥
-AUDIT=True
+```json5
+{
+  "AppId": "1000", // QQ机器人APPID
+  "Secret": "secret", // QQ机器人密钥
+  "Audit": false, // 是否已通过审核
+  "WsKey": "secret", // WebSocket密钥
+  "BotName": "HuHoBot", // 机器人名称
+  "WsUrl": "ws://127.0.0.1:25671", // WebSocket地址
+  "UrlGetIframeImg": "http://127.0.0.1:3123/api/sync_app_img?host={SERVERHOST}&dark=true&stype={PLATFORM}&icon=https%3A%2F%2Fpic.txssb.cn%2FHuHoBot-200px.png", // 获取图片
+  "UrlDefaultImg": "https://pic.txssb.cn/HuHoBot-200px.png", // 默认图片地址
+  "MotdOriginUrl": "motd.txssb.cn", // MOTD服务地址（源）
+  "MotdProxyUrl": "http://127.0.0.1:2087", // MOTD服务地址（代理）（留空不替换）
+  "GenerateImgUrl": "http://127.0.0.1:2087/{IMGID}.png", // 图片生成服务地址
+  "TtfPath": "MapleMono-CN-Regular.ttf", // 图片生成字体路径
+  "PublicGroup": [], // 公开群组ID（/在线服务器 展示连接到WS主控的服务器数量）
+  "EnableMotd": true, // 是否启用MOTD
+  "EnableAuth": true, // 是否启用认证
+  "EnableSensitiveFilter": true // 是否启用敏感词过滤
+}
+
 ```
 
 ### 服务监控
-- 自动心跳检测（5秒间隔）
+- 自动心跳检测（15秒间隔）
 - 断线自动重连（3秒重试）
 - 请求超时自动清理
 
 ## License
-GPL-3.0 License © 2025 HuHoBot
+GPL-3.0 License © 2026 HuHoBot
 
