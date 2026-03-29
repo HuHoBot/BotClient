@@ -1,4 +1,5 @@
 import logging
+from pathlib import Path
 
 import aiosqlite
 import re
@@ -14,20 +15,110 @@ import ymbotpy.errors
 #from botpy import BotAPI
 from ymbotpy import BotAPI
 
-from config import APPID
-from libs.SensitiveFilter import SimpleSensitiveFilter
+
+from libs.SensitiveFilter import ApiSensitiveFilter, SimpleSensitiveFilter
+from libs.configManager import ConfigManager
 
 databasePath = 'data/database.db'
-latestVersion = 'data/latestVersion.json'
-BotName = 'HuHoBot'
 _log = logging.getLogger()
+_config_manager = ConfigManager()
 
-bindServerTemp = {}
+class BindServer:
+    def __init__(self):
+        self.bindServer = {}
 
-url_getBedrockStatus = "https://motdbe.blackbe.work/api?host="
-url_getJavaStatus = "https://motdbe.blackbe.work/api/java?host="
-url_getBedrockStatusImg = "https://motdbe.blackbe.work/status_img?host="
-url_getJavaStatusImg = "https://motdbe.blackbe.work/status_img/java?host="
+    def addBindServer(self,uniqueId,serverId,groupId,author,isMoreGroup):
+        self.bindServer[uniqueId] = {
+            "serverId"   : serverId,
+            "groupId"    : groupId,
+            "author"     : author,
+            "isMoreGroup": isMoreGroup,
+        }
+        return True
+
+    def getBindServer(self,uniqueId):
+        if uniqueId in self.bindServer:
+            return self.bindServer[uniqueId]
+        else:
+            return None
+
+    def delBindServer(self,uniqueId):
+        if uniqueId in self.bindServer:
+            del self.bindServer[uniqueId]
+            return True
+        else:
+            return False
+
+bindServerObj = BindServer()
+
+async def init_db():
+    data_dir = Path(databasePath).parent
+    data_dir.mkdir(parents=True, exist_ok=True)
+
+    async with aiosqlite.connect(databasePath) as db:
+        await db.execute(
+            '''
+            CREATE TABLE IF NOT EXISTS bindServer (
+                `group` TEXT PRIMARY KEY,
+                `serverId` TEXT NOT NULL,
+                `hashKey` TEXT NOT NULL
+            )
+            '''
+        )
+        await db.execute(
+            '''
+            CREATE TABLE IF NOT EXISTS adminList (
+                `group` TEXT NOT NULL,
+                `author` TEXT NOT NULL,
+                PRIMARY KEY (`group`, `author`)
+            )
+            '''
+        )
+        await db.execute(
+            '''
+            CREATE TABLE IF NOT EXISTS nickName (
+                `group` TEXT NOT NULL,
+                `author` TEXT NOT NULL,
+                `name` TEXT NOT NULL,
+                `forceEdit` INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (`group`, `author`)
+            )
+            '''
+        )
+        await db.execute(
+            '''
+            CREATE TABLE IF NOT EXISTS blockMotd (
+                `group` TEXT PRIMARY KEY
+            )
+            '''
+        )
+        await db.execute(
+            '''
+            CREATE TABLE IF NOT EXISTS bindQQ (
+                `groupId` TEXT NOT NULL,
+                `openId` TEXT NOT NULL,
+                `qq` TEXT NOT NULL,
+                PRIMARY KEY (`groupId`, `openId`)
+            )
+            '''
+        )
+        await db.commit()
+
+
+def get_iframe_img_url() -> str:
+    return _config_manager.get('UrlGetIframeImg', ConfigManager.DEFAULT_URL_GET_IFRAME_IMG)
+
+
+def get_default_img_url() -> str:
+    return _config_manager.get('UrlDefaultImg', ConfigManager.DEFAULT_URL_DEFAULT_IMG)
+
+
+def get_motd_origin_url() -> str:
+    return _config_manager.get('MotdOriginUrl', ConfigManager.DEFAULT_MOTD_ORIGIN_URL)
+
+
+def get_motd_proxy_url() -> str:
+    return _config_manager.get('MotdProxyUrl', ConfigManager.DEFAULT_MOTD_PROXY_URL)
 
 class AsyncSQLite:
     def __init__(self, db_path):
@@ -72,7 +163,7 @@ class Motd:
     
     def _request(self,url) -> dict:
         try:
-            response = requests.get(url, timeout=10)
+            response = requests.get(url, timeout=30)
             response.raise_for_status()  # 检查 HTTP 请求是否成功
             return response.json()  # 将返回值转换为字典
         except requests.exceptions.RequestException as e:
@@ -85,50 +176,56 @@ class Motd:
         cleaned_text = re.sub(r"\s+", " ", cleaned_text.strip())
         return cleaned_text
         
-    def motd_be(self) -> dict:
-        motd_respone = self._request(url_getBedrockStatus+self.url)
-        if(motd_respone['status'] != "online"):
-            return {"online":False}
+    def motd_be(self,motd_raw) -> dict:
+        motd_respone = motd_raw.get("serverData")
+        pureMotd = motd_respone.get('pureMotd',"").replace('.','·')
+        imgUrl = motd_raw.get('screenshotUrl', get_default_img_url())
         statusText= ("\nMC 基岩版服务器状态查询\n"
                     "⭕️状态: 在线\n"
-                    f"📋描述: {self._remove_color_codes(motd_respone.get('motd','').replace('.','_'))}\n"
+                    f"📋描述: {self._remove_color_codes(pureMotd)}\n"
                     f"📡延迟: {motd_respone.get('delay',-1)} ms\n"
-                    f"💳协议版本: {motd_respone.get('agreement',-1)}\n"
+                    f"💳协议版本: {motd_respone.get('protocol',-1)}\n"
                     f"🧰游戏版本: {motd_respone.get('version','0.0.0')}\n"
-                    f"👧在线人数: {motd_respone.get('online',-1)}/{motd_respone.get('max',-1)}\n"
-                    f"🚩地图名称: {motd_respone.get('level_name','world').replace('.','·')}\n"
+                    f"👧在线人数: {motd_respone.get('players').get('online',-1)}/{motd_respone.get('players').get('max',-1)}\n"
+                    f"🚩地图名称: {motd_respone.get('levelname','world').replace('.','·')}\n"
                     f"🎗️默认模式: {motd_respone.get('gamemode','Unknown')}")
-        return {'online':True,'text':statusText,'imgUrl':url_getBedrockStatusImg+self.url}
+        return {'online':True,'text':statusText,'imgUrl':imgUrl}
     
-    def motd_je(self) -> dict:
-        motd_respone = self._request(url_getJavaStatus+self.url)
-        if(motd_respone['status'] != "online"):
-            return {"online":False}
+    def motd_je(self,motd_raw) -> dict:
+        motd_respone = motd_raw.get("serverData")
+        pureMotd = motd_respone.get('pureMotd', "").replace('.', '·')
+        imgUrl = motd_raw.get('screenshotUrl', get_default_img_url())
         statusText= ("\nMC Java服务器状态查询\n"
                     "⭕️状态:在线\n"
-                    f"📋描述: {self._remove_color_codes(motd_respone.get('motd','').replace('.','_'))}\n"
-                    f"💳协议版本: {motd_respone.get('agreement',-1)}\n"
+                    f"📋描述: {self._remove_color_codes(pureMotd)}\n"
+                    f"💳协议版本: {motd_respone.get('protocol',-1)}\n"
                     f"🧰游戏版本: {motd_respone.get('version','0.0.0')}\n"
                     f"📡延迟: {motd_respone.get('delay',-1)} ms\n"
-                    f"👧玩家在线: {motd_respone.get('online',-1)}/{motd_respone.get('max',-1)}")
-        return {'online':True,'text':statusText,'imgUrl':url_getJavaStatusImg+self.url}
-    
-    def motd(self,platform='auto') -> dict:
-        if(platform == 'auto'):
-            for motd_method in [self.motd_je,self.motd_be]:
-                motd_data = motd_method()
-                if motd_data.get('online'):
-                    return motd_data
-        elif(platform == 'je'):
-            motd_data = self.motd_je()
-            if motd_data.get('online'):
-                return motd_data
-        else:
-            motd_data = self.motd_be()
-            if motd_data.get('online'):
-                return motd_data
+                    f"👧玩家在线: {motd_respone.get('players').get('online',-1)}/{motd_respone.get('players').get('max',-1)}")
+        # 拆分host
+
+        return {'online':True,'text':statusText,'imgUrl':imgUrl}
+
+    def sendRequest(self,url):
+        motd_raw = self._request(url)
+        motd_respone = motd_raw.get("serverData", {"status": "offline"})
+        status = motd_respone.get('status', 'offline')
+
+        if status != 'online':
+            return {"online": False}
+
+        platform = motd_respone.get("type")
+        if platform == 'Java':
+            return self.motd_je(motd_raw)
+        elif platform == 'Bedrock':
+            return self.motd_be(motd_raw)
 
         return {"online": False}
+    
+    def motd(self,platform='auto') -> dict:
+        url = get_iframe_img_url().format(SERVERHOST=self.url, PLATFORM=platform)
+        return self.sendRequest(url)
+
 
 class Chat:
     def __init__(self):
@@ -170,8 +267,9 @@ class Chat:
                     msgObj['last_time'] = time.time()  # 更新时间戳
 
                     #过滤文本信息
-                    filter = SimpleSensitiveFilter()
-                    output = filter.replace(msg)
+                    output = msg
+                    if _config_manager.get('EnableSensitiveFilter', ConfigManager.DEFAULT_ENABLE_SENSITIVE_FILTER):
+                        output = ApiSensitiveFilter.replace(msg)
 
                     try:
                         await self.botApi.post_group_message(
@@ -272,16 +370,47 @@ async def queryName(memberData:dict):
         return rows[0][0]
     return None
 
-#添加玩家NickName
-async def setNickName(memberData:dict):
+
+async def setNickName(memberData: dict, changeStatus=False):
     db = AsyncSQLite(databasePath)
     await db.connect()
     try:
-        await db.execute('INSERT OR REPLACE INTO nickName (`group`, `author`, `name`) VALUES (?, ?, ?)', (memberData['groupId'], memberData['author'], memberData['nick']))
+        # --- 第一步：查别人是否占用 ---
+        # 无论是否是 changeStatus，都不允许抢占别人的名字
+        other_user = await db.fetchone(
+                'SELECT 1 FROM nickName WHERE `group` = ? AND LOWER(`name`) = LOWER(?) AND `author` != ?;',
+                (memberData['groupId'], memberData['nick'], memberData['author'])
+        )
+        if other_user:
+            return False
+
+        # --- 第二步：查自己是否已经锁死 ---
+        # 如果 changeStatus 为 True，我们直接跳过这个判断，允许修改
+        if not changeStatus:
+            self_status = await db.fetchone(
+                    'SELECT `forceEdit` FROM nickName WHERE `group` = ? AND `author` = ?;',
+                    (memberData['groupId'], memberData['author'])
+            )
+            # 如果查到了记录，且 forceEdit 为 1（锁定），则拦截
+            if self_status and self_status[0] == 1:
+                return False
+
+        # --- 第三步：写入 ---
+        # 如果是 changeStatus，通常 memberData['forceEdit'] 会传入新的状态（0 或 1）
+        force_edit_val = int(memberData.get('forceEdit', 0))
+
+        await db.execute(
+                'INSERT OR REPLACE INTO nickName (`group`, `author`, `name`, `forceEdit`) VALUES (?, ?, ?, ?);',
+                (memberData['groupId'], memberData['author'], memberData['nick'], force_edit_val)
+        )
         await db.commit()
+        return True
+
+    except Exception as e:
+        print(f"Error: {e}")
+        return False
     finally:
         await db.close()
-    return True
 
 # 对绑定的uid生成一个hash256密钥
 def generate_hash_key(input_string:str,salt_length=16):
@@ -329,7 +458,7 @@ async def queryBindServerByGroup(groupId):
         rows = await db.fetchall(f"select `group`,`serverId` from bindServer where `group`='{groupId}'")
     finally:
         await db.close()
-    if(len(rows) > 0):
+    if len(rows) > 0:
         return rows[0]
     return None
 
@@ -490,16 +619,6 @@ def isGuid(s):
 def generate_randomCode():
     return ''.join(random.choices(string.digits, k=4))
 
-#从文件获取最新版本
-def getLatestVersion():
-    try:
-        with open(latestVersion, 'r', encoding='utf-8') as file:
-            # 解析 JSON 内容并将其转换为字典
-            data = json.load(file)
-            return data
-    except Exception as e:
-        return {}
-
 def try_parse_json(input_str: str):
     """
     尝试解析字符串是否为JSON格式
@@ -510,5 +629,5 @@ def try_parse_json(input_str: str):
     except json.JSONDecodeError:
         return False, input_str
 
-def getQLogoUrl(OpenID:str,size:int = 640):
+def getQLogoUrl(APPID:str,OpenID:str,size:int = 640):
     return f"https://q.qlogo.cn/qqapp/{APPID}/{OpenID}/{size}"

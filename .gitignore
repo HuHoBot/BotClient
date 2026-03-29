@@ -4,7 +4,9 @@ botpy.log
 nickName.json
 websocketTest.py
 temp.*
-config*
+config.json
+config_*.py
+configs/
 help.*
 *.log
 *.zip
@@ -12,7 +14,10 @@ help.*
 .lip/
 *.log.*
 /test/
-sensitive-words/*
+sensitive-words/*.txt
+CLAUDE.md
+.claude/*
+*.ttf
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

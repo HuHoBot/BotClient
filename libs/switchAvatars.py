@@ -1,97 +1,118 @@
-import cv2
-import numpy as np
-import requests
-import os
-import tempfile
+import aiohttp
+import math
+from io import BytesIO
+from PIL import Image
 from libs.basic import *
 from ymbotpy import logging
 
 _log = logging.get_logger()
 
-def download_image(url, timeout=5):
-    """下载图片到临时文件"""
+
+async def _download_image(session, url, timeout=5):
+    """异步下载图片，直接返回 PIL Image 对象"""
     try:
-        response = requests.get(url, stream=True, timeout=timeout)
-        if response.status_code == 200:
-            # 创建临时文件
-            fd, path = tempfile.mkstemp(suffix='.jpg')
-            with os.fdopen(fd, 'wb') as f:
-                for chunk in response.iter_content(1024):
-                    f.write(chunk)
-            return path
-        return None
+        async with session.get(url, timeout=aiohttp.ClientTimeout(total=timeout)) as response:
+            if response.status == 200:
+                data = await response.read()
+                return Image.open(BytesIO(data))
+            return None
     except Exception as e:
-        _log.error(f"下载失败: {str(e)}")
+        _log.error(f"下载失败: {e}")
         return None
 
-def compare_qq_avatars(qq_number, openid):
+
+def _phash(img, hash_size=8, dct_size=32):
+    """
+    计算感知哈希 (pHash)
+    1. 缩放到 dct_size x dct_size 灰度图
+    2. 对像素矩阵做 2D DCT-II 变换
+    3. 取左上 hash_size x hash_size 的低频分量
+    4. 以中位数为阈值生成二进制哈希
+    """
+    img = img.convert("L").resize((dct_size, dct_size), Image.LANCZOS)
+    pixels = list(img.getdata())
+
+    # 构建 2D 像素矩阵
+    matrix = []
+    for y in range(dct_size):
+        matrix.append(pixels[y * dct_size:(y + 1) * dct_size])
+
+    # 预计算 cos 值，避免重复运算
+    cos_table = {}
+    for k in range(hash_size):
+        for n in range(dct_size):
+            cos_table[(k, n)] = math.cos(math.pi * (2 * n + 1) * k / (2 * dct_size))
+
+    # 计算 2D DCT-II（只算左上 hash_size x hash_size）
+    dct = []
+    for u in range(hash_size):
+        for v in range(hash_size):
+            s = 0.0
+            for y in range(dct_size):
+                for x in range(dct_size):
+                    s += matrix[y][x] * cos_table[(u, y)] * cos_table[(v, x)]
+            cu = 1.0 / math.sqrt(2) if u == 0 else 1.0
+            cv = 1.0 / math.sqrt(2) if v == 0 else 1.0
+            dct.append(s * cu * cv * 2.0 / dct_size)
+
+    # 去掉 DC 分量（第一个值），用剩余值算中位数
+    dct_no_dc = dct[1:]
+    median = sorted(dct_no_dc)[len(dct_no_dc) // 2]
+
+    # 生成哈希：大于中位数为 1，否则为 0
+    return int("".join("1" if v > median else "0" for v in dct), 2)
+
+
+def _hamming_distance(hash1, hash2, bits=64):
+    """计算两个哈希的汉明距离"""
+    xor = hash1 ^ hash2
+    return bin(xor).count("1")
+
+
+def _hash_similarity(hash1, hash2, bits=64):
+    """将汉明距离转为 0~1 的相似度"""
+    dist = _hamming_distance(hash1, hash2, bits)
+    return 1.0 - dist / bits
+
+
+async def compare_qq_avatars(APPID,qq_number, openid):
     """
     返回值说明: (相似度, 错误代码, 错误信息)
     错误代码定义:
     0 - 成功
     1 - QQ头像下载失败
     2 - OpenID头像下载失败
-    3 - 图片尺寸不符
-    4 - 图片读取失败
-    5 - 直方图计算失败
+    5 - 哈希计算失败
     """
     qq_url = f"https://q.qlogo.cn/g?b=qq&nk={qq_number}&s=100"
-    openid_url = getQLogoUrl(OpenID=openid, size=100)
+    openid_url = getQLogoUrl(APPID,OpenID=openid, size=100)
 
-    # 下载图片并捕获具体错误
-    path1 = download_image(qq_url)
-    if not path1:
-        return (-1.0, 1, f"QQ头像下载失败（可能原因：网络超时/QQ号不存在） URL: {qq_url}")
+    async with aiohttp.ClientSession() as session:
+        img1 = await _download_image(session, qq_url)
+        if img1 is None:
+            return (-1.0, 1, f"QQ头像下载失败（可能原因：网络超时/QQ号不存在） URL: {qq_url}")
 
-    path2 = download_image(openid_url)
-    if not path2:
-        os.remove(path1)  # 清理已下载的QQ头像
-        return (-1.0, 2, f"OpenID头像下载失败（可能原因：授权过期/用户未设置） URL: {openid_url}")
+        img2 = await _download_image(session, openid_url)
+        if img2 is None:
+            return (-1.0, 2, f"OpenID头像下载失败（可能原因：授权过期/用户未设置） URL: {openid_url}")
 
-    try:
-        # 读取图片
-        img1 = cv2.imread(path1, cv2.IMREAD_GRAYSCALE)
-        img2 = cv2.imread(path2, cv2.IMREAD_GRAYSCALE)
-
-        # 校验图片有效性
-        if img1 is None or img2 is None:
-            error_type = 4
-            error_msg = "图片读取失败（可能原因：文件损坏/无效格式）"
-            if img1 is None: error_msg += f" | QQ头像路径: {path1}"
-            if img2 is None: error_msg += f" | OpenID头像路径: {path2}"
-            return (-1.0, error_type, error_msg)
-
-        # 校验图片尺寸
-        if img1.shape != (100, 100) or img2.shape != (100, 100):
-            error_size = f"QQ头像尺寸: {img1.shape if img1 is not None else '无效'}, " \
-                        f"OpenID头像尺寸: {img2.shape if img2 is not None else '无效'}"
-            return (-1.0, 3, f"图片尺寸不符（要求100x100）{error_size}")
-
-        # 计算直方图
         try:
-            hist1 = cv2.calcHist([img1], [0], None, [16], [0, 256])
-            hist2 = cv2.calcHist([img2], [0], None, [16], [0, 256])
-        except cv2.error as e:
-            return (-1.0, 5, f"直方图计算失败（OpenCV错误：{str(e)}）")
+            hash1 = _phash(img1)
+            hash2 = _phash(img2)
+            similarity = _hash_similarity(hash1, hash2)
+        except Exception as e:
+            return (-1.0, 5, f"哈希计算失败（{e}）")
 
-        # 计算相似度
-        similarity = cv2.compareHist(hist1, hist2, cv2.HISTCMP_CORREL)
-        return (max(0.0, similarity), 0, "成功")
+        return (similarity, 0, "成功")
 
-    finally:
-        # 确保清理文件
-        for p in [path1, path2]:
-            if p and os.path.exists(p):
-                try:
-                    os.remove(p)
-                except Exception as e:
-                    _log.error(f"文件清理失败: {str(e)}")
 
 # 使用示例
 if __name__ == "__main__":
-    result = compare_qq_avatars("123456", "ABCD")
-    if result[1] == 0:
-        print(f"相似度：{result[0]:.2%}")
-    else:
-        print(f"错误 ({result[1]}): {result[2]}")
-
+    import asyncio
+    async def _test():
+        result = await compare_qq_avatars("APPID","123456", "ABCD")
+        if result[1] == 0:
+            print(f"相似度：{result[0]:.2%}")
+        else:
+            print(f"错误 ({result[1]}): {result[2]}")
+    asyncio.run(_test())
