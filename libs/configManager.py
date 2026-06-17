@@ -37,15 +37,18 @@ class ConfigManager:
     DEFAULT_GENERATE_IMG_URL = "http://127.0.0.1:2087/{IMGID}.png"
 
     def __init__(self, config_path: Optional[str] = None):
+        """初始化配置管理器，并确定配置文件路径。"""
         base_dir = Path(__file__).resolve().parent.parent
         self.config_path = Path(config_path) if config_path else base_dir / "config.json"
         self._config: Optional[ConfigData] = None
 
-    def exists(self) -> bool:
+    def Exists(self) -> bool:
+        """判断配置文件是否存在。"""
         return self.config_path.is_file()
 
     @staticmethod
-    def _require_string(data: dict[str, Any], field: str) -> str:
+    def _RequireString(data: dict[str, Any], field: str) -> str:
+        """读取必填字符串配置项，并执行非空校验。"""
         if field not in data:
             raise ValueError(f"配置文件缺少必要字段: {field}")
 
@@ -59,7 +62,8 @@ class ConfigManager:
         return value
 
     @staticmethod
-    def _require_bool(data: dict[str, Any], field: str) -> bool:
+    def _RequireBool(data: dict[str, Any], field: str) -> bool:
+        """读取必填布尔配置项。"""
         if field not in data:
             raise ValueError(f"配置文件缺少必要字段: {field}")
 
@@ -69,7 +73,8 @@ class ConfigManager:
         return value
 
     @staticmethod
-    def _optional_string(data: dict[str, Any], field: str, default: str) -> str:
+    def _OptionalString(data: dict[str, Any], field: str, default: str) -> str:
+        """读取可选字符串配置项，并在缺失时使用默认值。"""
         value = data.get(field, default)
         if not isinstance(value, str):
             raise ValueError(f"配置项 {field} 必须为字符串")
@@ -80,21 +85,24 @@ class ConfigManager:
         return value
 
     @staticmethod
-    def _optional_string_allow_empty(data: dict[str, Any], field: str, default: str) -> str:
+    def _OptionalStringAllowEmpty(data: dict[str, Any], field: str, default: str) -> str:
+        """读取允许为空字符串的可选配置项。"""
         value = data.get(field, default)
         if not isinstance(value, str):
             raise ValueError(f"配置项 {field} 必须为字符串")
         return value.strip()
 
     @staticmethod
-    def _optional_bool(data: dict[str, Any], field: str, default: bool) -> bool:
+    def _OptionalBool(data: dict[str, Any], field: str, default: bool) -> bool:
+        """读取可选布尔配置项，并在缺失时使用默认值。"""
         value = data.get(field, default)
         if not isinstance(value, bool):
             raise ValueError(f"配置项 {field} 必须为布尔值")
         return value
 
     @staticmethod
-    def _optional_string_list(data: dict[str, Any], field: str, default: list[str]) -> list[str]:
+    def _OptionalStringList(data: dict[str, Any], field: str, default: list[str]) -> list[str]:
+        """读取字符串列表配置项，并校验每个元素类型与内容。"""
         value = data.get(field, list(default))
         if not isinstance(value, list):
             raise ValueError(f"配置项 {field} 必须为字符串列表")
@@ -109,38 +117,40 @@ class ConfigManager:
             result.append(item)
         return result
 
-    def validate(self, data: dict[str, Any]) -> ConfigData:
+    def Validate(self, data: dict[str, Any]) -> ConfigData:
+        """校验原始配置字典，并返回规范化后的配置对象。"""
         if not isinstance(data, dict):
             raise ValueError("配置文件格式错误：根节点必须是 JSON 对象")
 
         return {
-            "AppId": self._require_string(data, "AppId"),
-            "Secret": self._require_string(data, "Secret"),
-            "Audit": self._require_bool(data, "Audit"),
-            "WsKey": self._require_string(data, "WsKey"),
-            "BotName": self._optional_string(data, "BotName", self.DEFAULT_BOT_NAME),
-            "WsUrl": self._optional_string(data, "WsUrl", self.DEFAULT_WS_URL),
-            "UrlGetIframeImg": self._optional_string(data, "UrlGetIframeImg", self.DEFAULT_URL_GET_IFRAME_IMG),
-            "UrlDefaultImg": self._optional_string(data, "UrlDefaultImg", self.DEFAULT_URL_DEFAULT_IMG),
-            "MotdOriginUrl": self._optional_string_allow_empty(data, "MotdOriginUrl", self.DEFAULT_MOTD_ORIGIN_URL),
-            "MotdProxyUrl": self._optional_string_allow_empty(data, "MotdProxyUrl", self.DEFAULT_MOTD_PROXY_URL),
-            "GenerateImgUrl": self._optional_string(data, "GenerateImgUrl", self.DEFAULT_GENERATE_IMG_URL),
-            "TtfPath": self._optional_string(data, "TtfPath", self.DEFAULT_TTF_PATH),
-            "PublicGroup": self._optional_string_list(data, "PublicGroup", self.DEFAULT_PUBLIC_GROUP),
-            "EnableMotd": self._optional_bool(data, "EnableMotd", self.DEFAULT_ENABLE_MOTD),
-            "EnableAuth": self._optional_bool(data, "EnableAuth", self.DEFAULT_ENABLE_AUTH),
-            "EnableSensitiveFilter": self._optional_bool(data, "EnableSensitiveFilter", self.DEFAULT_ENABLE_SENSITIVE_FILTER),
+            "AppId": self._RequireString(data, "AppId"),
+            "Secret": self._RequireString(data, "Secret"),
+            "Audit": self._RequireBool(data, "Audit"),
+            "WsKey": self._RequireString(data, "WsKey"),
+            "BotName": self._OptionalString(data, "BotName", self.DEFAULT_BOT_NAME),
+            "WsUrl": self._OptionalString(data, "WsUrl", self.DEFAULT_WS_URL),
+            "UrlGetIframeImg": self._OptionalString(data, "UrlGetIframeImg", self.DEFAULT_URL_GET_IFRAME_IMG),
+            "UrlDefaultImg": self._OptionalString(data, "UrlDefaultImg", self.DEFAULT_URL_DEFAULT_IMG),
+            "MotdOriginUrl": self._OptionalStringAllowEmpty(data, "MotdOriginUrl", self.DEFAULT_MOTD_ORIGIN_URL),
+            "MotdProxyUrl": self._OptionalStringAllowEmpty(data, "MotdProxyUrl", self.DEFAULT_MOTD_PROXY_URL),
+            "GenerateImgUrl": self._OptionalString(data, "GenerateImgUrl", self.DEFAULT_GENERATE_IMG_URL),
+            "TtfPath": self._OptionalString(data, "TtfPath", self.DEFAULT_TTF_PATH),
+            "PublicGroup": self._OptionalStringList(data, "PublicGroup", self.DEFAULT_PUBLIC_GROUP),
+            "EnableMotd": self._OptionalBool(data, "EnableMotd", self.DEFAULT_ENABLE_MOTD),
+            "EnableAuth": self._OptionalBool(data, "EnableAuth", self.DEFAULT_ENABLE_AUTH),
+            "EnableSensitiveFilter": self._OptionalBool(data, "EnableSensitiveFilter", self.DEFAULT_ENABLE_SENSITIVE_FILTER),
         }
 
-    def load(self) -> ConfigData:
+    def Load(self) -> ConfigData:
+        """从磁盘读取并缓存配置。"""
         with self.config_path.open("r", encoding="utf-8") as file:
             data = json.load(file)
 
-        config = self.validate(data)
+        config = self.Validate(data)
         self._config = config
         return config
 
-    def save(
+    def Save(
         self,
         app_id: str,
         secret: str,
@@ -159,7 +169,8 @@ class ConfigManager:
         enable_auth: Optional[bool] = None,
         enable_sensitive_filter: Optional[bool] = None,
     ) -> ConfigData:
-        config = self.validate({
+        """保存配置到磁盘，并返回规范化后的配置对象。"""
+        config = self.Validate({
             "AppId": app_id,
             "Secret": secret,
             "Audit": audit,
@@ -185,7 +196,13 @@ class ConfigManager:
         self._config = config
         return config
 
-    def get(self, key: str, default=None):
+    def Get(self, key: str, default=None):
+        """按键读取配置项，必要时会先触发配置加载。"""
         if self._config is None:
-            self.load()
+            self.Load()
         return self._config.get(key, default)
+
+    def BuildGenerateImgUrl(self, image_id: str) -> str:
+        """根据模板生成命令回报图片地址。"""
+        template = self.Get("GenerateImgUrl", self.DEFAULT_GENERATE_IMG_URL)
+        return template.replace("{IMGID}", image_id)

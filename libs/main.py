@@ -1,1067 +1,1003 @@
 # -*- coding: utf-8 -*-
 
+import asyncio
+import json
 import os
+import re
+import uuid
+
 import ymbotpy
+from ymbotpy import BotAPI, Client, WebHookClient, logging
+from ymbotpy.ext.command_util import Commands
 from ymbotpy.interaction import Interaction
 from ymbotpy.manage import GroupManageEvent
-from ymbotpy.message import GroupMessage,MessageAudit
-from ymbotpy.ext.command_util import *
-from ymbotpy import WebHookClient, Client
+from ymbotpy.message import GroupMessage, MessageAudit
+from ymbotpy.types.inline import Keyboard, Button, RenderData, Action, Permission, KeyboardRow
+from ymbotpy.types.message import MarkdownPayload, KeyboardPayload
 
-from libs.switchAvatars import *
-from libs.websocketClient import *
-from libs.generateImg import *
-from libs.basic import get_motd_origin_url, get_motd_proxy_url
+from libs.basic import GenerateRandomCode, GetQLogoUrl, IsGuid, IsNumber, SplitCommandParams, TryParseJson
+from libs.chatService import ApplySensitiveFilter, ChatManager, COMMAND_CALLBACK_PREFIX, MessageReplyService
+from libs.commandHelper import (
+    AuthCommandService,
+    BuildServerActionPayload,
+    BuildServerSelectorPayload,
+    CommandGuardService,
+    PeekInteractionCallback,
+    PERMISSION_DENIED_TEXT,
+    PopInteractionCallback,
+    RegisterInteractionCallback,
+    SendServerSelectorWithCallback,
+)
 from libs.configManager import ConfigManager
+from libs.motdService import MOTD_USAGE_TEXT, MotdCommandService
+from libs.repositories import (
+    AdminRepositoryInstance,
+    AuthRepositoryInstance,
+    BindRepositoryInstance,
+    MotdBlockRepositoryInstance,
+    NicknameRepositoryInstance,
+    PendingBindStoreInstance,
+)
+from libs.websocketClient import WebsocketClient, WebsocketEventSet
 
-from libs.SensitiveFilter import ApiSensitiveFilter
-
-_log = logging.get_logger()    #Botpy Logger
+_log = logging.get_logger()
 _config_manager = ConfigManager()
 
 
-def get_public_groups() -> list[str]:
-    return _config_manager.get('PublicGroup', ConfigManager.DEFAULT_PUBLIC_GROUP)
+def GetPublicGroups() -> list[str]:
+    """读取允许查看公共在线服务器列表的群配置。"""
+    return _config_manager.Get("PublicGroup", ConfigManager.DEFAULT_PUBLIC_GROUP)
+
+
+def BuildWsSendFailedText(server_id: str) -> str:
+    """构造统一的 WebSocket 发送失败提示。"""
+    return f"无法向Id为{server_id}的服务器发送请求，请管理员检查连接状态"
 
 
 class ServerManager:
+    """管理当前进程持有的 WebSocket 客户端实例。"""
+
     def __init__(self) -> None:
-        self.wsServer = None
+        """初始化服务器连接容器。"""
+        self.ws_server = None
 
-    def setWsServer(self,wsServerObj:WebsocketClient) -> None:
-        self.wsServer = wsServerObj
+    def SetWsServer(self, ws_server_obj: WebsocketClient) -> None:
+        """注册当前进程持有的 WebSocket 客户端实例。"""
+        self.ws_server = ws_server_obj
 
-    def getWsServer(self) -> WebsocketClient:
-        return self.wsServer
-
-serverManager = ServerManager()
-
-def apply_sensitive_filter(text: str) -> str:
-    if _config_manager.get('EnableSensitiveFilter', ConfigManager.DEFAULT_ENABLE_SENSITIVE_FILTER):
-        return ApiSensitiveFilter.replace(text)
-    return text
+    def GetWsServer(self) -> WebsocketClient:
+        """返回当前已注册的 WebSocket 客户端实例。"""
+        return self.ws_server
 
 
-async def postImages(api: BotAPI, message: GroupMessage, imgUrl: str, text: str, failedText: str):
-    try:
-        uploadMedia = await api.post_group_file(
-            message.group_openid,
-            1,
-            imgUrl,
-            False
-        )
-        await api.post_group_message(
-            group_openid=message.group_openid,
-            msg_type=7,
-            msg_id=message.id,
-            content=text,
-            media=uploadMedia,
-            msg_seq=1
-        )
-    except Exception as e:
-        _log.error(f"发送图片失败: {e}")
-        await message.reply(content=failedText)
+ServerManagerInstance = ServerManager()
 
-
-"""
-    屏蔽词发送消息
-"""
-async def postMsgWithSensitive(message: GroupMessage, text:str,msg_seq=1):
-    if _config_manager.get('EnableSensitiveFilter', ConfigManager.DEFAULT_ENABLE_SENSITIVE_FILTER):
-        output = ApiSensitiveFilter.replace(text)
-    else:
-        output = text
-    reply_out = await message.reply(content=output, msg_seq=msg_seq)
-    return reply_out
 
 @Commands("帮助")
-async def getHelp(api: BotAPI, message: GroupMessage, params=None):
-    botName = _config_manager.get('BotName', ConfigManager.DEFAULT_BOT_NAME)
+async def GetHelp(api: BotAPI, message: GroupMessage, params=None):
+    """发送机器人文档、帮助和快速开始入口。"""
+    bot_name = _config_manager.Get("BotName", ConfigManager.DEFAULT_BOT_NAME)
+    reply_service = MessageReplyService(api, message)
     if (not params) or ("文档" in params):
-        await postImages(api,message,"https://pic.txssb.cn/docQrCode.png",f"{botName} 文档站请扫描二维码或手动输入网址",'图片发送失败，请稍后再试.')
+        await reply_service.PostImageMessage(
+            "https://pic.txssb.cn/docQrCode.png",
+            f"{bot_name} 文档站请扫描二维码或手动输入网址",
+            "图片发送失败，请稍后再试.",
+        )
     elif "管理" in params:
-        await postImages(api,message,"https://pic.txssb.cn/adminHelp.jpeg",f"{botName} 管理帮助如图，更多详情请前往文档站查看",'图片发送失败，请使用"/帮助 文档"获取文档链接')
+        await reply_service.PostImageMessage(
+            "https://pic.txssb.cn/adminHelp.jpeg",
+            f"{bot_name} 管理帮助如图，更多详情请前往文档站查看",
+            '图片发送失败，请使用"/帮助 文档"获取文档链接',
+        )
     elif "指令" in params:
-        await postImages(api,message,"https://pic.txssb.cn/commandHelp.jpeg",f"{botName} 指令列表如图，更多详情请前往文档站查看",'图片发送失败，请使用"/帮助 文档"获取文档链接')
+        await reply_service.PostImageMessage(
+            "https://pic.txssb.cn/commandHelp.jpeg",
+            f"{bot_name} 指令列表如图，更多详情请前往文档站查看",
+            '图片发送失败，请使用"/帮助 文档"获取文档链接',
+        )
     elif "快速开始" in params:
-        await postImages(api,message,"https://pic.txssb.cn/quickStartQrCode.png",f"{botName} 文档站快速开始请扫描二维码或手动输入网址",'图片发送失败，请稍后再试.')
-
+        await reply_service.PostImageMessage(
+            "https://pic.txssb.cn/quickStartQrCode.png",
+            f"{bot_name} 文档站快速开始请扫描二维码或手动输入网址",
+            "图片发送失败，请稍后再试.",
+        )
     return True
+
 
 @Commands("添加白名单")
-async def addAllowList(api: BotAPI, message: GroupMessage, params=None):
-    server_instance = serverManager.getWsServer()
-    adminRet = await queryIsAdmin(message.group_openid,message.author.member_openid)
-    if not adminRet:
-        await message.reply(content="你没有足够的权限.")
+async def AddAllowList(api: BotAPI, message: GroupMessage, params=None):
+    """向绑定服务器发送添加白名单请求。"""
+    guard_service = CommandGuardService(message)
+    if not await guard_service.RequireAdmin():
         return True
     if not params:
-        await message.reply(content=f"参数不正确")
+        await message.reply(content="参数不正确")
         return True
 
     unique_id = str(uuid.uuid4())
 
-    async def wlReply(packedMsg, _msg_seq=2):
-        msgText = packedMsg.get('text', "")
-        try:
-            if _msg_seq > 5:
-                return True
-            await message.reply(content=msgText, msg_seq=_msg_seq)
-            return True
-        except ymbotpy.errors.ServerError:
-            if _msg_seq <= 5:
-                return await wlReply(packedMsg, _msg_seq + 1)
-            return True
+    async def run(server_id: str):
 
-    ret = await queryBindServerByGroup(message.group_openid)
-    if(ret == None):
-        await message.reply(content=f"您还未绑定服务器，请按说明进行绑定.")
-        return True
-    server_instance.addCallbackFunc(unique_id, wlReply)
-    wsRet = await server_instance.sendMsgByServerId(ret[1],websocketEvent.addWhiteList,{"xboxid":params},unique_id)
-    if(wsRet):
-        await postMsgWithSensitive(message,f"已请求添加白名单.\nXbox Id:{params}\n请管理员核对.如有错误,请输入/删除白名单 {params}")
-    else:
-        await message.reply(content=f"无法向Id为{ret[1]}的服务器发送请求，请管理员检查连接状态")
+        server_instance = ServerManagerInstance.GetWsServer()
+        reply_service = MessageReplyService(api, message)
+        server_instance.AddCallbackFunc(unique_id, reply_service.CreateTextReplyCallback())
+        ws_ret = await server_instance.SendMsgByServerId(
+                server_id,
+                WebsocketEventSet.AddWhiteList,
+                {"xboxid": params},
+                unique_id,
+        )
+        if ws_ret:
+            await reply_service.PostSensitiveMessage(
+                f"已请求添加白名单.\nXbox Id:{params}\n请管理员核对.如有错误,请输入/删除白名单 {params}"
+                )
+        else:
+            await message.reply(content=BuildWsSendFailedText(server_id))
+
+    bind_server = await guard_service.GetBoundServer()
+    if len(bind_server) == 1:
+        await run(bind_server[0])
+    elif len(bind_server) > 1:
+        await SendServerSelectorWithCallback(api, message, unique_id, run)
     return True
 
+
 @Commands("删除白名单")
-async def reCall(api: BotAPI, message: GroupMessage, params=None):
-    server_instance = serverManager.getWsServer()
-    adminRet = await queryIsAdmin(message.group_openid,message.author.member_openid)
-    if(not adminRet):
-        await message.reply(content="你没有足够的权限.")
+async def DeleteAllowList(api: BotAPI, message: GroupMessage, params=None):
+    """向绑定服务器发送删除白名单请求。"""
+    guard_service = CommandGuardService(message)
+    if not await guard_service.RequireAdmin():
         return True
-    if(not params):
-        await message.reply(content=f"参数不正确")
+    if not params:
+        await message.reply(content="参数不正确")
         return True
-    
+
     unique_id = str(uuid.uuid4())
 
-    async def wlReply(packedMsg, _msg_seq=2):
-        msgText = packedMsg.get('text', "")
-        try:
-            if _msg_seq > 5:
-                return True
-            await message.reply(content=msgText, msg_seq=_msg_seq)
-            return True
-        except ymbotpy.errors.ServerError:
-            if _msg_seq <= 5:
-                return await wlReply(packedMsg, _msg_seq + 1)
-            return True
+    async def run(server_id: str):
 
+        server_instance = ServerManagerInstance.GetWsServer()
+        reply_service = MessageReplyService(api, message)
+        server_instance.AddCallbackFunc(unique_id, reply_service.CreateTextReplyCallback())
+        ws_ret = await server_instance.SendMsgByServerId(
+                server_id,
+                WebsocketEventSet.DelWhiteList,
+                {"xboxid": params},
+                unique_id,
+        )
+        if ws_ret:
+            await reply_service.PostSensitiveMessage(f"已请求删除Xbox Id为{params}的白名单.")
+        else:
+            await message.reply(content=BuildWsSendFailedText(server_id))
 
-    ret = await queryBindServerByGroup(message.group_openid)
-    if ret is None:
-        await message.reply(content=f"您还未绑定服务器，请按说明进行绑定.")
-        return True
-    server_instance.addCallbackFunc(unique_id, wlReply)
-    wsRet = await server_instance.sendMsgByServerId(ret[1],websocketEvent.delWhiteList,{"xboxid":params},unique_id)
-    if wsRet:
-        await postMsgWithSensitive(message,f"已请求删除Xbox Id为{params}的白名单.")
-    else:
-        await message.reply(content=f"无法向Id为{ret[1]}的服务器发送请求，请管理员检查连接状态")
+    bind_server = await guard_service.GetBoundServer()
+    if len(bind_server) == 1:
+        await run(bind_server[0])
+    elif len(bind_server) > 1:
+        await SendServerSelectorWithCallback(api, message, unique_id, run)
     return True
 
 @Commands("绑定")
-async def bind(api: BotAPI, message: GroupMessage, params=None):
-    paramsList = splitCommandParams(params)
-    if len(paramsList) < 1 or len(paramsList) > 2:  # 参数数量校验
+async def Bind(api: BotAPI, message: GroupMessage, params=None):
+    """校验并发起群与服务器的绑定流程。"""
+    params_list = SplitCommandParams(params)
+
+    if len(params_list) == 0:
+        bind_ret = await BindRepositoryInstance.GetByGroup(message.group_openid)
+        if not bind_ret:
+            await message.reply(content="当前群未绑定任何服务器。")
+            return True
+        lines = ["当前群已绑定服务器:"]
+        for row in bind_ret:
+            server_id = row[1]
+            server_name = await BindRepositoryInstance.GetServerName(message.group_openid, server_id)
+            if server_name is None:
+                server_name = "未命名服务器"
+            lines.append(f"名称: {server_name}")
+            lines.append(f"ID: {server_id}")
+        await message.reply(content="\n".join(lines))
+        return True
+
+    if len(params_list) < 1 or len(params_list) > 2:
         await message.reply(content="参数不正确，格式应为：/命令 <serverId> [多群]")
         return True
 
-    # 判断是否包含多群参数
-    isMoreGroup = False
-    if len(paramsList) == 2:
-        if paramsList[1] != "多群":  # 严格校验第二个参数
+    is_more_group = False
+    if len(params_list) == 2:
+        if params_list[1] != "多群":
             await message.reply(content="第二个参数只能是「多群」")
             return True
-        isMoreGroup = True
-    serverId = paramsList[0]
+        is_more_group = True
 
-    #查询是否已经绑定过
-    bindRet = await queryBindServerByGroup(message.group_openid)
-    if bindRet is not None:
-        #查询是否是管理员
-        adminRet = await queryIsAdmin(message.group_openid,message.author.member_openid)
-        if not adminRet:
-            await message.reply(content="你没有足够的权限.")
-            return True
-    
+    server_id = params_list[0]
+    guard_service = CommandGuardService(message)
+    bind_ret = await BindRepositoryInstance.GetByGroup(message.group_openid)
+    if bind_ret is not None and not await guard_service.RequireAdmin():
+        return True
+
     unique_id = str(uuid.uuid4())
+    server_instance = ServerManagerInstance.GetWsServer()
+    reply_service = MessageReplyService(api, message)
+    server_instance.AddCallbackFunc(unique_id, reply_service.CreateTextReplyCallback(error_prefix="绑定回复重试失败"))
 
-    async def Reply(packedMsg, _msg_seq=2):
-        msgText = packedMsg.get('text', "")
-        try:
-            if _msg_seq > 5:
-                return True
-            await message.reply(content=msgText, msg_seq=_msg_seq)
-            return True
-        except ymbotpy.errors.ServerError as e:
-            if _msg_seq <= 5:
-                return await Reply(packedMsg, _msg_seq + 1)
-            _log.error(f"绑定回复重试失败: {e}")
-            return True
-    server_instance = serverManager.getWsServer()
-    server_instance.addCallbackFunc(unique_id,Reply)
-
-    if isGuid(serverId):
-        #发送bindRequest请求
-        bindCode = generate_randomCode()
-        bindReq_Data = {"bindCode":bindCode}
-        bindReq_Ret = await server_instance.sendMsgByServerId(serverId,websocketEvent.bindRequest,bindReq_Data,unique_id)
-        if bindReq_Ret:
-            bindServerObj.addBindServer(unique_id,serverId,message.group_openid,message.author.member_openid,isMoreGroup)
-            await message.reply(content=f"已向服务端下发绑定请求，本次绑定校验码为:{bindCode}，请查看服务端控制台出现的信息。")
+    if IsGuid(server_id):
+        bind_code = GenerateRandomCode()
+        bind_req_ret = await server_instance.SendMsgByServerId(
+            server_id,
+            WebsocketEventSet.BindRequest,
+            {"bindCode": bind_code},
+            unique_id,
+        )
+        if bind_req_ret:
+            PendingBindStoreInstance.AddRequest(
+                unique_id,
+                server_id,
+                message.group_openid,
+                message.author.member_openid,
+                is_more_group,
+            )
+            await message.reply(content=f"已向服务端下发绑定请求，本次绑定校验码为:{bind_code}，请查看服务端控制台出现的信息。")
         else:
-            await message.reply(content=f"无法向Id为{serverId}的服务器下发绑定请求，请管理员检查连接状态")
-    else:
-        await postImages(api,message,"https://pic.txssb.cn/quickStartQrCode.png",
-                         "你发送的内容不是一个合法的绑定Key，请重新确认（绑定Key应为32个字符长度的十六进制字符串）\n详情请查看文档中的快速开始，扫描二维码查看",
-                         "你发送的内容不是一个合法的绑定Key，请重新确认（绑定Key应为32个字符长度的十六进制字符串）\n详情请查看文档中的快速开始(请使用 /帮助 来获取文档)")
+            await message.reply(content=BuildWsSendFailedText(server_id))
+        return True
+
+    await reply_service.PostImageMessage(
+        "https://pic.txssb.cn/quickStartQrCode.png",
+        "你发送的内容不是一个合法的绑定Key，请重新确认（绑定Key应为32个字符长度的十六进制字符串）\n详情请查看文档中的快速开始，扫描二维码查看",
+        "你发送的内容不是一个合法的绑定Key，请重新确认（绑定Key应为32个字符长度的十六进制字符串）\n详情请查看文档中的快速开始(请使用 /帮助 来获取文档)",
+    )
+    return True
+
+@Commands("解绑")
+async def unBind(api: BotAPI, message: GroupMessage, params=None):
+    """按服务器ID删除当前群的绑定关系，无参数时弹出选择框。"""
+    guard_service = CommandGuardService(message)
+    if not await guard_service.RequireAdmin():
+        return True
+
+    params_list = SplitCommandParams(params)
+    if len(params_list) == 0:
+        async def do_unbind(server_id: str):
+            await BindRepositoryInstance.UnbindServer(message.group_openid, server_id)
+            await message.reply(content=f"已解除当前群与服务器 {server_id} 的绑定。")
+
+        await SendServerSelectorWithCallback(
+            api, message,
+            str(uuid.uuid4()),
+            do_unbind,
+            markdown_text="# 选择要解绑的服务器\n请点击下方按钮",
+        )
+        return True
+
+    server_id = params_list[0]
+    bind_ret = await BindRepositoryInstance.GetByGroup(message.group_openid)
+    if not bind_ret:
+        await message.reply(content="当前群未绑定任何服务器，无需解绑。")
+        return True
+
+    matched = any(row[1] == server_id for row in bind_ret)
+    if not matched:
+        await message.reply(content=f"当前群未绑定服务器 {server_id}。")
+        return True
+
+    await BindRepositoryInstance.UnbindServer(message.group_openid, server_id)
+    await message.reply(content=f"已解除当前群与服务器 {server_id} 的绑定。")
+    return True
+
+
+@Commands("设置服务器")
+async def SetServer(api: BotAPI, message: GroupMessage, params=None):
+    """弹出服务器选择框或直接操作指定服务器。"""
+    guard_service = CommandGuardService(message)
+    if not await guard_service.RequireAdmin():
+        return True
+
+    async def send_action_form(server_id: str):
+        server_name = await BindRepositoryInstance.GetServerName(message.group_openid, server_id) or "未命名服务器"
+        markdown, keyboard = BuildServerActionPayload(server_id, server_name)
+        await api.post_group_message(
+            group_openid=message.group_openid,
+            msg_type=2,
+            msg_id=message.id,
+            msg_seq=2,
+            markdown=markdown,
+            keyboard=keyboard,
+        )
+
+    params_list = SplitCommandParams(params)
+    if len(params_list) >= 1:
+        server_id = params_list[0]
+        bind_ret = await BindRepositoryInstance.GetByGroup(message.group_openid)
+        matched = any(row[1] == server_id for row in bind_ret)
+        if not matched:
+            await message.reply(content=f"当前群未绑定服务器 {server_id}。")
+            return True
+        await send_action_form(server_id)
+        return True
+
+    unique_id = str(uuid.uuid4())
+    await SendServerSelectorWithCallback(api, message, unique_id, send_action_form)
+    return True
+
+
+@Commands("命名服务器")
+async def RenameServer(api: BotAPI, message: GroupMessage, params=None):
+    """重命名已绑定的服务器。格式：/命名服务器 <ServerId> <名称>"""
+    guard_service = CommandGuardService(message)
+    if not await guard_service.RequireAdmin():
+        return True
+
+    params_list = SplitCommandParams(params)
+    if len(params_list) < 2:
+        await message.reply(content="参数不正确，格式应为：/命名服务器 <ServerId> <名称>")
+        return True
+
+    server_id = params_list[0]
+    name = " ".join(params_list[1:])
+
+    bind_ret = await BindRepositoryInstance.GetByGroup(message.group_openid)
+    matched = any(row[1] == server_id for row in bind_ret)
+    if not matched:
+        await message.reply(content=f"当前群未绑定服务器 {server_id}。")
+        return True
+
+    await BindRepositoryInstance.SetServerName(message.group_openid, server_id, name)
+    await message.reply(content=f"已将该服务器重命名为: {name}")
     return True
 
 
 @Commands("查信息")
-async def queryInfo(api: BotAPI, message: GroupMessage, params=None):
+async def QueryInfo(api: BotAPI, message: GroupMessage, params=None):
+    """查询当前用户信息或指定 OpenId 的 QQ 绑定信息。"""
+    guard_service = CommandGuardService(message)
     if params:
-        adminRet = await queryIsAdmin(message.group_openid, message.author.member_openid)
-        if not adminRet:
-            await message.reply(content="你没有足够的权限.")
+        if not await guard_service.RequireAdmin():
             return True
-        ret = await queryBindQQ(message.group_openid, params)
-        if ret:
-            await message.reply(content=f"此用户已绑定QQ:{ret}")
+        bind_qq = await AuthRepositoryInstance.GetBoundQQ(message.group_openid, params)
+        if bind_qq:
+            await message.reply(content=f"此用户已绑定QQ:{bind_qq}")
         else:
-            await message.reply(content=f"此用户未绑定QQ")
+            await message.reply(content="此用户未绑定QQ")
         return True
 
-    #查绑定昵称
-    nick = await queryName(
-        {
-            "groupId": message.group_openid,
-            "author" : message.author.member_openid,
-        }
-    )
+    nick = await NicknameRepositoryInstance.GetName(message.group_openid, message.author.member_openid)
     if not nick:
         nick = "未绑定昵称"
 
-    await message.reply(content=f"你的OpenId:{message.author.member_openid}\n群的OpenId:{message.group_openid}\n绑定的昵称:{apply_sensitive_filter(nick)}")
+    await message.reply(
+        content=f"你的OpenId:{message.author.member_openid}\n群的OpenId:{message.group_openid}\n绑定的昵称:{ApplySensitiveFilter(nick)}"
+    )
     return True
+
 
 @Commands("查管理")
-async def queryAdminCmd(api: BotAPI, message: GroupMessage, params=None):
-    adminRet = await queryIsAdmin(message.group_openid,message.author.member_openid)
-    if not adminRet:
-        await message.reply(content="你没有足够的权限.")
+async def QueryAdminCommand(api: BotAPI, message: GroupMessage, params=None):
+    """查询指定 OpenId 是否为当前群管理员。"""
+    guard_service = CommandGuardService(message)
+    if not await guard_service.RequireAdmin():
         return True
-    ret = await queryIsAdmin(message.group_openid,params)
+    ret = await AdminRepositoryInstance.IsAdmin(message.group_openid, params)
     if ret:
-        await message.reply(content=f"此人是管理员")
+        await message.reply(content="此人是管理员")
     else:
-        await message.reply(content=f"此人不是管理员")
+        await message.reply(content="此人不是管理员")
     return True
+
 
 @Commands("加管理")
-async def addAdminCmd(api: BotAPI, message: GroupMessage, params=None):
-    #print(message)
-    adminRet = await queryIsAdmin(message.group_openid,message.author.member_openid)
-    if not adminRet:
-        await message.reply(content="你没有足够的权限.")
+async def AddAdminCommand(api: BotAPI, message: GroupMessage, params=None):
+    """为当前群新增管理员。"""
+    guard_service = CommandGuardService(message)
+    if not await guard_service.RequireAdmin():
         return True
-    ret = await addAdmin(message.group_openid,params)
+    ret = await AdminRepositoryInstance.AddAdmin(message.group_openid, params)
     if ret:
-        await postMsgWithSensitive(message,f"已为本群添加OpenId:{params}的管理员")
+        reply_service = MessageReplyService(api, message)
+        await reply_service.PostSensitiveMessage(f"已为本群添加OpenId:{params}的管理员")
     return True
 
+
 @Commands("删管理")
-async def delAdminCmd(api: BotAPI, message: GroupMessage, params=None):
-    adminRet = await queryIsAdmin(message.group_openid,message.author.member_openid)
-    if not adminRet:
-        await message.reply(content="你没有足够的权限.")
+async def DelAdminCommand(api: BotAPI, message: GroupMessage, params=None):
+    """移除当前群的管理员。"""
+    guard_service = CommandGuardService(message)
+    if not await guard_service.RequireAdmin():
         return True
-    ret = await delAdmin(message.group_openid,params)
+    ret = await AdminRepositoryInstance.RemoveAdmin(message.group_openid, params)
     if ret:
-        await postMsgWithSensitive(message,f"已为本群删除OpenId:{params}的管理员")
+        reply_service = MessageReplyService(api, message)
+        await reply_service.PostSensitiveMessage(f"已为本群删除OpenId:{params}的管理员")
     return True
 
 @Commands("设置名称")
-async def setGroupName(api: BotAPI, message: GroupMessage, params=None):
-    ret = await queryBindServerByGroup(message.group_openid)
-    if ret is None:
-        await message.reply(content=f"您还未绑定服务器，请按说明进行绑定.")
+async def SetGroupName(api: BotAPI, message: GroupMessage, params=None):
+    """设置或强制修改群服互通昵称。"""
+    guard_service = CommandGuardService(message)
+    if await guard_service.GetBoundServer() is None:
         return True
 
-    async def setNameTag(nick,memberId=None,forceEdit=False,changeStatus=False):
-        if not memberId:
-            memberId = message.author.member_openid
-            callName = f"您(OpenId:{memberId})"
+    async def SetNameTag(nick, member_id=None, force_edit=False, change_status=False):
+        """执行昵称写入并统一回复设置结果。"""
+        if not member_id:
+            member_id = message.author.member_openid
+            call_name = f"您(OpenId:{member_id})"
         else:
-            callName = f"OpenId:{memberId}"
-        result = await setNickName(
-            {
-                "groupId": message.group_openid,
-                "author" : memberId,
-                "nick"   : nick,
-                "forceEdit": forceEdit
-            },
-            changeStatus
+            call_name = f"OpenId:{member_id}"
+
+        result = await NicknameRepositoryInstance.SetName(
+            message.group_openid,
+            member_id,
+            nick,
+            force_edit=force_edit,
+            change_status=change_status,
         )
         if result:
-            isForceText = "强制" if forceEdit else ""
-            await message.reply(content=f"已将{callName}的群服互通昵称{isForceText}设置为{apply_sensitive_filter(nick)}")
+            is_force_text = "强制" if force_edit else ""
+            await message.reply(content=f"已将{call_name}的群服互通昵称{is_force_text}设置为{ApplySensitiveFilter(nick)}")
         else:
-            await message.reply(content=f"设置失败，该名称已被群内其他成员使用或被管理员强制锁定.")
+            await message.reply(content="设置失败，该名称已被群内其他成员使用或被管理员强制锁定.")
 
-    paramsList = splitCommandParams(params)
-    adminRet = await queryIsAdmin(message.group_openid, message.author.member_openid)
+    params_list = SplitCommandParams(params)
+    admin_ret = await AdminRepositoryInstance.IsAdmin(message.group_openid, message.author.member_openid)
 
-    if len(paramsList) < 1:
+    if len(params_list) < 1:
         await message.reply(content="设置名称使用帮助:\n/设置名称 名称-可自行设定名称(无需管理员权限)\n/设置名称 名称 OpenId-管理员设定某人名称(或解除锁定)\n/设置名称 名称 OpenId 强制-管理员强制设定某人名称并锁定\n注:如输入的名称带有空格请使用\"\"（英文双引号）包裹")
         return True
-    elif len(paramsList) == 1:
-        await setNameTag(nick=paramsList[0],forceEdit=False)
+    if len(params_list) == 1:
+        await SetNameTag(nick=params_list[0], force_edit=False)
         return True
-    elif len(paramsList) == 2:
-        if not adminRet:
-            await message.reply(content="你没有足够的权限.")
+    if len(params_list) == 2:
+        if not admin_ret:
+            await message.reply(content=PERMISSION_DENIED_TEXT)
             return True
-        await setNameTag(nick=paramsList[0],memberId=paramsList[1],forceEdit=False,changeStatus=True)
+        await SetNameTag(nick=params_list[0], member_id=params_list[1], force_edit=False, change_status=True)
         return True
-    elif len(paramsList) == 3:
-        isForce = paramsList[2] == "强制"
-        if not adminRet:
-            await message.reply(content="你没有足够的权限.")
+    if len(params_list) == 3:
+        is_force = params_list[2] == "强制"
+        if not admin_ret:
+            await message.reply(content=PERMISSION_DENIED_TEXT)
             return True
-        await setNameTag(nick=paramsList[0],memberId=paramsList[1],forceEdit=isForce,changeStatus=True)
+        await SetNameTag(nick=params_list[0], member_id=params_list[1], force_edit=is_force, change_status=True)
         return True
     return True
-
 
 @Commands("发信息")
-async def sendGameMsg(api: BotAPI, message: GroupMessage, params=None):
-    ret = await queryBindServerByGroup(message.group_openid)
-    if ret is None:
-        await message.reply(content=f"您还未绑定服务器，请按说明进行绑定.")
+async def SendGameMessage(api: BotAPI, message: GroupMessage, params=None):
+    """把群消息转发到绑定服务器的游戏聊天。"""
+    guard_service = CommandGuardService(message)
+    bind_server = await guard_service.GetBoundServer()
+    if bind_server is None:
         return True
-    nick = await queryName({
-        "groupId":message.group_openid,
-        "author":message.author.member_openid,
-    })
+
+    nick = await NicknameRepositoryInstance.GetName(message.group_openid, message.author.member_openid)
     if nick is None:
         await message.reply(content="没有找到你的昵称数据，请使用/设置名称 <昵称>来设置")
-    else:
-        ret = await queryBindServerByGroup(message.group_openid)
-        if ret is None:
-            await message.reply(content=f"您还未绑定服务器，请按说明进行绑定.")
-            return True
-        serverId = ret[1]
+        return True
 
-        unique_id = str(uuid.uuid4())
+    #server_id = bind_server[1]
 
-        #存储至ChatTemp
-        chatManager.postBotApi(api)
-        chatManager.saveTemp(serverId,message.group_openid,message.id,1)
+    unique_id = str(uuid.uuid4())
+
+    async def run(server_id:str):
+        ChatManager.SetBotApi(api)
+        ChatManager.RememberMessage(server_id, message.group_openid, message.id, 1)
 
         if params:
-            server_instance = serverManager.getWsServer()
-            wsRet = await server_instance.sendMsgByServerId(serverId,websocketEvent.sendChat,{"msg":params,"nick":nick},unique_id) #发信息
+            server_instance = ServerManagerInstance.GetWsServer()
+            ws_ret = await server_instance.SendMsgByServerId(
+                server_id,
+                WebsocketEventSet.SendChat,
+                {"msg": params, "nick": nick},
+                str(uuid.uuid4()),
+            )
+            if not ws_ret:
+                await message.reply(content=BuildWsSendFailedText(server_id))
 
-            if not wsRet:
-                await message.reply(content=f"无法向Id为{serverId}的服务器发送请求，请管理员检查连接状态")
-            
+    if len(bind_server) == 1:
+        await run(bind_server[0])
+    elif len(bind_server) > 1:
+        await SendServerSelectorWithCallback(api, message, unique_id, run)
     return True
+
 
 @Commands("执行命令")
-async def sendCmd(api: BotAPI, message: GroupMessage, params=None):
-    adminRet = await queryIsAdmin(message.group_openid,message.author.member_openid)
-    if not adminRet:
-        await message.reply(content="你没有足够的权限.")
+async def SendCommand(api: BotAPI, message: GroupMessage, params=None):
+    """向绑定服务器执行管理员命令并处理回调。"""
+    guard_service = CommandGuardService(message)
+    if not await guard_service.RequireAdmin():
         return True
+
     unique_id = str(uuid.uuid4())
 
-    async def cmdReply(packedMsg,_msg_seq=2):
-        text = packedMsg.get('text', "")
-        callbackConvert = packedMsg.get('callbackConvert', 0)
+    async def run(server_id:str):
 
-        msgLineCount = len(text.split("\n"))
-        image_url = None
-        if msgLineCount < callbackConvert or callbackConvert <= 0:
-            content = f"[消息回报]\n{text}"
-        else:
-            # 生图
-            generate_img(text, unique_id)
-            content = "[消息回报]"
-            image_url = f"http://bot.axe.ink:2087/{unique_id}.png"
+        server_instance = ServerManagerInstance.GetWsServer()
+        reply_service = MessageReplyService(api, message)
 
-        # 发送消息的统一处理函数
-        async def send_message(content_text, img_url=None, msg_seq=2):
-            # 如果消息序列号已经超过5次，直接返回True删除callback
-            if msg_seq > 5:
+        async def CmdReply(packed_msg, _msg_seq=3):
+            """处理执行命令后的服务端回报。"""
+            try:
+                text = packed_msg.get("text", "")
+                callback_convert = packed_msg.get("callbackConvert", 0)
+                content, image_url, width, height = reply_service.BuildCommandCallbackPayload(
+                    text, unique_id, callback_convert
+                    )
+                await reply_service.SendCallbackResponse(
+                        content,
+                        img_url=image_url,
+                        img_width=width,
+                        img_height=height,
+                        msg_seq=_msg_seq
+                )
+                return True
+            except Exception as exc:
+                _log.error(f"命令回调处理失败: {exc}")
+                await reply_service.PostSensitiveMessage(f"出现错误：{exc}", msg_seq=3)
                 return True
 
-            if img_url is not None:
-                try:
-                    uploadMedia = await api.post_group_file(
-                            message.group_openid,
-                            1,
-                            img_url,
-                            False
-                    )
-                    await api.post_group_message(
-                            group_openid=message.group_openid,
-                            msg_type=7,
-                            msg_id=message.id,
-                            content=content_text,
-                            media=uploadMedia,
-                            msg_seq=msg_seq
-                    )
-                    # 发送成功，根据msgContinue决定是否保留callback
-                    return True
-                except ymbotpy.errors.ServerError:
-                    # 递归重试
-                    result = await send_message(content_text, img_url, msg_seq + 1)
-                    return result
-                except Exception as e:
-                    # 其他异常，直接发送错误信息
-                    await postMsgWithSensitive(message,f"[消息回报]\n发送图片失败:{e}\n{content_text}", msg_seq=msg_seq)
-                    # 发送完成，根据msgContinue决定是否保留callback
-                    return True
-            else:
-                try:
-                    await message.reply(content=content_text, msg_seq=msg_seq)
-                    # 发送成功，根据msgContinue决定是否保留callback
-                    return True
-                except ymbotpy.errors.ServerError:
-                    # 递归重试
-                    result = await send_message(content_text, img_url, msg_seq + 1)
-                    return result
+        server_instance.AddCallbackFunc(unique_id, CmdReply)
+        ws_ret = await server_instance.SendMsgByServerId(
+                server_id,
+                WebsocketEventSet.SendCommand,
+                {"cmd": params},
+                unique_id,
+        )
+        if ws_ret:
+            await message.reply(content="已向服务器发送命令，请等待执行.")
+        else:
+            await message.reply(content=BuildWsSendFailedText(server_id))
 
-                    # 调用发送函数
-
-        _result = await send_message(content, image_url, _msg_seq)
-        return _result
-    server_instance = serverManager.getWsServer()
-    server_instance.addCallbackFunc(unique_id,cmdReply)
-    
-    ret = await queryBindServerByGroup(message.group_openid)
-    if ret is None:
-        await message.reply(content=f"您还未绑定服务器，请按说明进行绑定.")
-        return True
-    wsRet = await server_instance.sendMsgByServerId(ret[1],websocketEvent.sendCommand,{"cmd":params},unique_id)
-    if wsRet:
-        await message.reply(content="已向服务器发送命令，请等待执行.")
-    else:
-        await message.reply(content=f"无法向Id为{ret[1]}的服务器发送请求，请管理员检查连接状态")
+    bind_server = await guard_service.GetBoundServer()
+    if len(bind_server) == 1:
+        await run(bind_server[0])
+    elif len(bind_server) > 1:
+        await SendServerSelectorWithCallback(api, message, unique_id, run)
     return True
+
 
 @Commands("查白名单")
-async def queryWl(api: BotAPI, message: GroupMessage, params=None):
-    server_instance = serverManager.getWsServer()
-    adminRet = await queryIsAdmin(message.group_openid,message.author.member_openid)
-    if not adminRet:
-        await message.reply(content="你没有足够的权限.")
+async def QueryWhiteList(api: BotAPI, message: GroupMessage, params=None):
+    """查询白名单列表或按关键字筛选白名单。"""
+    guard_service = CommandGuardService(message)
+    if not await guard_service.RequireAdmin():
         return True
+
     unique_id = str(uuid.uuid4())
-    ret = await queryBindServerByGroup(message.group_openid)
-    if ret is None:
-        await message.reply(content=f"您还未绑定服务器，请按说明进行绑定.")
-        return True
-    # 判断参数是否为空
-    if not params:
+
+    async def run(server_id:str):
         payload = {}
-    elif isNumber(params):
-        payload = {"page": int(params)}
-    else:
-        payload = {"key": params}
+        if params:
+            if IsNumber(params):
+                payload = {"page": int(params)}
+            else:
+                payload = {"key": params}
 
-    async def wlReply(packedMsg, _msg_seq=2):
-        msg = packedMsg.get('text', "")
-        try:
-            if _msg_seq > 5:
-                return True
-            await postMsgWithSensitive(message,msg, msg_seq=_msg_seq)
-            return True
-        except ymbotpy.errors.ServerError:
-            if _msg_seq <= 5:
-                await postMsgWithSensitive(message,packedMsg, msg_seq=_msg_seq + 1)
-            return True
 
-    server_instance.addCallbackFunc(unique_id, wlReply)
+        server_instance = ServerManagerInstance.GetWsServer()
+        reply_service = MessageReplyService(api, message)
+        server_instance.AddCallbackFunc(unique_id, reply_service.CreateTextReplyCallback(use_sensitive_filter=True))
+        ws_ret = await server_instance.SendMsgByServerId(
+                server_id,
+                WebsocketEventSet.QueryWhiteList,
+                payload,
+                unique_id,
+        )
+        if not ws_ret:
+            await message.reply(content=BuildWsSendFailedText(server_id))
 
-    # 向服务器发送消息
-    wsRet = await server_instance.sendMsgByServerId(ret[1], websocketEvent.queryWhiteList, payload, unique_id)
-
-    # 检查发送结果
-    if not wsRet:
-        await message.reply(content=f"无法向Id为{ret[1]}的服务器发送请求，请管理员检查连接状态")
+    bind_server = await guard_service.GetBoundServer()
+    if len(bind_server) == 1:
+        await run(bind_server[0])
+    elif len(bind_server) > 1:
+        await SendServerSelectorWithCallback(api, message, unique_id, run)
     return True
+
 
 @Commands("查在线")
-async def queryOnline(api: BotAPI, message: GroupMessage, params=None):
+async def QueryOnline(api: BotAPI, message: GroupMessage, params=None):
+    """查询服务器在线玩家并注册结果回调。"""
+    guard_service = CommandGuardService(message)
+    bind_server = await guard_service.GetBoundServer()
+
     unique_id = str(uuid.uuid4())
-    ret = await queryBindServerByGroup(message.group_openid)
-    if ret is None:
-        await message.reply(content=f"您还未绑定服务器，请按说明进行绑定.")
-        return True
-    async def onlineReply(data: dict):
-        #获取data内消息
-        msg = data.get('msg', '')
-        rpMsg = msg.replace("\u200b","\n")
 
-        #检测是否有imgUrl，若有则优先使用
-        if (data.get('imgUrl') is not None) and (data.get('imgUrl') != "") :
-            if data.get('post_img',False):
-                url = data.get("url", "")
-                imgUrl = data.get('imgUrl')
-                newImgUrl = ""
+    async def run(server_id:str):
 
-                #抓取图片
-                origin_url = get_motd_origin_url()
-                proxy_url = get_motd_proxy_url()
-                if origin_url and proxy_url and origin_url in imgUrl and "/api/iframe_img" in imgUrl:
-                    motd = Motd("")
-                    proxy_url = proxy_url.rstrip("/")
-                    imgUrl = imgUrl.replace(f"https://{origin_url}", proxy_url).replace(f"http://{origin_url}", proxy_url)
-                    motdRaw = motd.sendRequest(imgUrl)
-                    if motdRaw.get("online"):
-                        newImgUrl = motdRaw.get("imgUrl")
-                    else:
-                        newImgUrl = imgUrl
-                else:
-                    newImgUrl = imgUrl
-
-
-                preTip = ""
-                if ("easecation" in url) or ("hypixel" in url):
-                    preTip = "(若发现查询出来的图片不是本服务器，请先修改config中的motd字段，或修改post_img使其不推送图片)\n"
-                try:
-                    uploadMedia = await api.post_group_file(message.group_openid,1,newImgUrl,False)
-                    output = apply_sensitive_filter(f'{preTip}{rpMsg}')
-                    await api.post_group_message(
-                        group_openid=message.group_openid,
-                        msg_type=7,
-                        msg_id=message.id,
-                        content=output,
-                        media=uploadMedia,
-                        msg_seq=2
-                    )
-                except Exception as e:
-                    _log.error(f"查在线图片上传失败: {e}")
-                    await postMsgWithSensitive(message,f'(图片上传失败)\n{preTip}{rpMsg}',msg_seq=2)
-
-            else:
-                await postMsgWithSensitive(message,f'{rpMsg}',msg_seq=2)
-            return
+        server_instance = ServerManagerInstance.GetWsServer()
+        motd_service = MotdCommandService(api, message)
+        server_instance.AddCallbackFunc(unique_id, motd_service.CreateOnlineReplyCallback())
+        ws_ret = await server_instance.SendMsgByServerId(
+                server_id,
+                WebsocketEventSet.QueryOnlineList,
+                {},
+                unique_id,
+        )
+        if ws_ret:
+            await message.reply(content="已向服务器发送查在线请求,请稍后...")
         else:
-            url = data.get("url","")
-            serverType = data.get('serverType',"bedrock")
+            await message.reply(content=BuildWsSendFailedText(server_id))
 
-            if serverType == 'java':
-                reqUrl = f'https://motdbe.blackbe.work/status_img/java?host={url}'
-            else:
-                reqUrl = f"https://motdbe.blackbe.work/status_img?host={url}"
-
-            preTip = ""
-            if("easecation" in url) or ("hypixel" in url):
-                preTip = "(若发现查询出来的图片不是本服务器，请先修改config中的motdUrl字段)\n"
-
-            if url != "" and is_valid_domain_port(url):
-                try:
-                    uploadMedia = await api.post_group_file(message.group_openid,1,reqUrl,False)
-                    output = apply_sensitive_filter(f'{preTip}在线玩家列表:\n{rpMsg}')
-                    await api.post_group_message(
-                        group_openid=message.group_openid,
-                        msg_type=7,
-                        msg_id=message.id,
-                        content=output,
-                        media=uploadMedia,
-                        msg_seq=2
-                    )
-                except Exception as e:
-                    _log.error(f"查在线MOTD图片上传失败: {e}")
-                    await postMsgWithSensitive(message,f'(图片上传失败)\n{preTip}在线玩家列表:\n{rpMsg}',msg_seq=2)
-            else:
-                await postMsgWithSensitive(message,f"{preTip}在线玩家列表:\n{rpMsg}",msg_seq=2)
-
-
-    server_instance = serverManager.getWsServer()
-    server_instance.addCallbackFunc(unique_id, onlineReply)
-
-    wsRet = await server_instance.sendMsgByServerId(ret[1], websocketEvent.queryOnlineList, {}, unique_id)
-    if wsRet:
-        await message.reply(content="已向服务器发送查在线请求,请稍后...")
-    else:
-        await message.reply(content=f"无法向Id为{ret[1]}的服务器发送请求，请管理员检查连接状态")
+    if len(bind_server) == 1:
+        await run(bind_server[0])
+    elif len(bind_server) > 1:
+        await SendServerSelectorWithCallback(api, message, unique_id, run)
     return True
+
 
 @Commands("在线服务器")
-async def queryClientList(api: BotAPI, message: GroupMessage, params=None):
-    ret = await queryBindServerByGroup(message.group_openid)
-    if ret is None:
-        await message.reply(content=f"您还未绑定服务器，请按说明进行绑定.")
+async def QueryClientList(api: BotAPI, message: GroupMessage, params=None):
+    """查询当前群可见的在线服务器列表。"""
+    guard_service = CommandGuardService(message)
+    bind_server = await guard_service.GetBoundServer()
+    if len(bind_server) == 0:
         return True
-    server_instance = serverManager.getWsServer()
 
-    if message.group_openid in get_public_groups():
-        clientList = await server_instance.queryClientList(["MainServer"])
+    server_instance = ServerManagerInstance.GetWsServer()
+    if message.group_openid in GetPublicGroups():
+        client_list = await server_instance.QueryClientList(["MainServer"])
     else:
-        clientList = await server_instance.queryClientList([ret[1]])
-    clientText = ""
-    for i in clientList:
-        clientText += i+'\n'
-    await postMsgWithSensitive(message,f"已连接{_config_manager.get('BotName', ConfigManager.DEFAULT_BOT_NAME)}的服务器:\n{clientText}")
+        server_id_list = []
+        for item in bind_server:
+            server_id_list.append(item[1])
+        client_list = await server_instance.QueryClientList(server_id_list)
+
+    client_text = ""
+    for item in client_list:
+        client_text += item + "\n"
+
+    reply_service = MessageReplyService(api, message)
+    await reply_service.PostSensitiveMessage(
+        f"已连接{_config_manager.Get('BotName', ConfigManager.DEFAULT_BOT_NAME)}的服务器:\n{client_text}"
+    )
     return True
 
-async def customRun(isAdmin: bool,api: BotAPI, message: GroupMessage,params=None):
-    ret = await queryBindServerByGroup(message.group_openid)
-    if ret is None:
-        await message.reply(content=f"您还未绑定服务器，请按说明进行绑定.")
-        return True
-    paramsList = splitCommandParams(params)
 
-    if len(paramsList) < 1:
-        await message.reply(content="参数不正确")
-        return True
-    keyWord = paramsList.pop(0)
+async def CustomRun(is_admin: bool, api: BotAPI, message: GroupMessage, params=None):
+    """执行服务端自定义命令并处理流式回报。"""
+    guard_service = CommandGuardService(message)
+    bind_server = await guard_service.GetBoundServer()
 
     unique_id = str(uuid.uuid4())
 
-    async def cmdReply(packedMsg, _msg_seq=2):
+    async def run(server_id:str):
+        params_list = SplitCommandParams(params)
+        if len(params_list) < 1:
+            await message.reply(content="参数不正确")
+            return True
 
+        key_word = params_list.pop(0)
 
-        text = packedMsg.get('text',"")
-        callbackConvert = packedMsg.get('callbackConvert', 0)
+        server_instance = ServerManagerInstance.GetWsServer()
+        reply_service = MessageReplyService(api, message)
 
-        is_json, parsed_data = try_parse_json(text)
+        async def CmdReply(packed_msg, _msg_seq=2):
+            """处理自定义执行命令的文本或图片回报。"""
+            try:
+                text = packed_msg.get("text", "")
+                callback_convert = packed_msg.get("callbackConvert", 0)
+                is_json, parsed_data = TryParseJson(text)
+                is_dict = is_json and isinstance(parsed_data, dict)
+                msg_continue = is_dict and parsed_data.get("msgContinue", False)
 
-        # 检查是否需要继续保留callback
-        if is_json and parsed_data.get("msgContinue", False):
-            # 如果msgContinue为True，则返回False，让WebsocketClient不删掉这个callbackId
-            msg_continue = True
-        else:
-            msg_continue = False
+                if is_dict:
+                    content = f"{COMMAND_CALLBACK_PREFIX}\n{parsed_data.get('text', '无消息')}"
+                    image_url = parsed_data.get("imgUrl")
+                    width = parsed_data.get("width", parsed_data.get("imgWidth", 0))
+                    height = parsed_data.get("height", parsed_data.get("imgHeight", 0))
+                else:
+                    filtered_text = ApplySensitiveFilter(text)
+                    content, image_url, width, height = reply_service.BuildCommandCallbackPayload(
+                        text,
+                        unique_id,
+                        callback_convert,
+                        render_text=filtered_text,
+                    )
 
-        content = ""
-        image_url = None
-
-        if is_json:
-            content = f"[消息回报]\n{parsed_data.get('text', '无消息')}"
-            image_url = parsed_data.get("imgUrl")
-        else:
-            msgLineCount = len(text.split("\n"))
-            filterText = apply_sensitive_filter(text)
-            if msgLineCount < callbackConvert or callbackConvert <= 0:
-                content = f"[消息回报]\n{filterText}"
-            else:
-                #生图
-                generate_img(filterText,unique_id)
-                content = "[消息回报]"
-                image_url = _config_manager.get("GenerateImgUrl",ConfigManager.DEFAULT_GENERATE_IMG_URL).replace("{IMGID}",unique_id)
-
-
-        # 发送消息的统一处理函数
-        async def send_message(content_text, img_url=None, msg_seq=2):
-            # 如果消息序列号已经超过5次，直接返回True删除callback
-            if msg_seq > 5:
+                await reply_service.SendCallbackResponse(
+                    content,
+                    img_url=image_url,
+                    img_width=width,
+                    img_height=height,
+                    msg_seq=_msg_seq,
+                )
+                return not msg_continue
+            except Exception as exc:
+                _log.error(f"自定义命令回调处理失败: {exc}")
+                await reply_service.PostSensitiveMessage(f"出现错误：{exc}", msg_seq=2)
                 return True
 
-            if img_url is not None:
-                try:
-                    uploadMedia = await api.post_group_file(
-                            message.group_openid,
-                            1,
-                            img_url,
-                            False
-                    )
-                    await api.post_group_message(
-                            group_openid=message.group_openid,
-                            msg_type=7,
-                            msg_id=message.id,
-                            content=content_text,
-                            media=uploadMedia,
-                            msg_seq=msg_seq
-                    )
-                    # 发送成功，根据msgContinue决定是否保留callback
-                    return not msg_continue
-                except ymbotpy.errors.ServerError:
-                    # 递归重试
-                    result = await send_message(content_text, img_url, msg_seq + 1)
-                    return result
-                except Exception as e:
-                    # 其他异常，直接发送错误信息
-                    await postMsgWithSensitive(message,f"[消息回报]\n发送图片失败:{e}\n{content_text}", msg_seq)
-                    # 发送完成，根据msgContinue决定是否保留callback
-                    return not msg_continue
-            else:
-                try:
-                    await message.reply(content=content_text, msg_seq=msg_seq)
-                    # 发送成功，根据msgContinue决定是否保留callback
-                    return not msg_continue
-                except ymbotpy.errors.ServerError:
-                    # 递归重试
-                    result = await send_message(content_text, img_url, msg_seq + 1)
-                    return result
-
-                    # 调用发送函数
-        _result = await send_message(content, image_url, _msg_seq)
-        return _result
-
-    server_instance = serverManager.getWsServer()
-    server_instance.addCallbackFunc(unique_id, cmdReply)
-
-    ret = await queryBindServerByGroup(message.group_openid)
-    if ret is None:
-        await message.reply(content=f"您还未绑定服务器，请按说明进行绑定.")
-        return True
-    #是否是管理员
-    sendEvent = websocketEvent.customRun
-    if isAdmin:
-        sendEvent = websocketEvent.customRun_Admin
-    nick = await queryName({
-        "groupId": message.group_openid,
-        "author": message.author.member_openid,
-    })
-
-    bindQQ = await queryBindQQ(message.group_openid,message.author.member_openid)
-    app_id = _config_manager.get("AppId")
-    wsRet = await server_instance.sendMsgByServerId(
-        ret[1],
-        sendEvent,
-        {
-            "key":keyWord,
-            "runParams":paramsList,
-            "author":{
-                "qlogoUrl":getQLogoUrl(app_id,message.author.member_openid),
-                "bindNick":nick,
-                "openId":message.author.member_openid,
-                "bindQQ":bindQQ
+        server_instance.AddCallbackFunc(unique_id, CmdReply)
+        send_event = WebsocketEventSet.CustomRunAdmin if is_admin else WebsocketEventSet.CustomRun
+        nick = await NicknameRepositoryInstance.GetName(message.group_openid, message.author.member_openid)
+        bind_qq = await AuthRepositoryInstance.GetBoundQQ(message.group_openid, message.author.member_openid)
+        app_id = _config_manager.Get("AppId")
+        ws_ret = await server_instance.SendMsgByServerId(
+            server_id,
+            send_event,
+            {
+                "key": key_word,
+                "runParams": params_list,
+                "author": {
+                    "qlogoUrl": GetQLogoUrl(app_id, message.author.member_openid),
+                    "bindNick": nick,
+                    "openId": message.author.member_openid,
+                    "bindQQ": bind_qq,
+                },
+                "group": {
+                    "openId": message.group_openid,
+                },
             },
-            "group":{
-                "openId":message.group_openid,
-            }
-        },
-        unique_id)
-    if wsRet:
-        adminText = ""
-        if isAdmin:
-            adminText = "(管理员)"
-        await postMsgWithSensitive(message,f"已向服务器发送自定义执行{adminText}请求，请等待执行.")
-    else:
-        await message.reply(content=f"无法向Id为{ret[1]}的服务器发送请求，请管理员检查连接状态")
-    return  True
+            unique_id,
+        )
+        if ws_ret:
+            admin_text = "(管理员)" if is_admin else ""
+            await reply_service.PostSensitiveMessage(f"已向服务器发送自定义执行{admin_text}请求，请等待执行.")
+        else:
+            await message.reply(content=BuildWsSendFailedText(server_id))
+        return  True
+
+    if len(bind_server) == 1:
+        await run(bind_server[0])
+    elif len(bind_server) > 1:
+        await SendServerSelectorWithCallback(api, message, unique_id, run)
+    return True
+
 
 @Commands("管理员执行")
-async def adminRunCommand(api: BotAPI, message: GroupMessage, params=None):
-    adminRet = await queryIsAdmin(message.group_openid,message.author.member_openid)
-    if not adminRet:
-        await message.reply(content="你没有足够的权限.")
+async def AdminRunCommand(api: BotAPI, message: GroupMessage, params=None):
+    """以管理员身份执行自定义命令。"""
+    guard_service = CommandGuardService(message)
+    if not await guard_service.RequireAdmin():
         return True
-    await customRun(True,api,message,params)
+    await CustomRun(True, api, message, params)
     return True
+
 
 @Commands("执行")
-async def runCommand(api: BotAPI, message: GroupMessage, params=None):
-    await customRun(False,api,message,params)
+async def RunCommand(api: BotAPI, message: GroupMessage, params=None):
+    """以普通身份执行自定义命令。"""
+    await CustomRun(False, api, message, params)
     return True
+
 
 @Commands("motd")
-async def motd(api: BotAPI, message: GroupMessage, params=None):
-    if not _config_manager.get('EnableMotd', ConfigManager.DEFAULT_ENABLE_MOTD):
-        await message.reply(content="Motd 功能未启用")
+async def Motd(api: BotAPI, message: GroupMessage, params=None):
+    """查询指定地址的 Motd 信息。"""
+    motd_service = MotdCommandService(api, message)
+    if not await motd_service.EnsureAccess():
         return True
-
-    adminRet = await queryIsAdmin(message.group_openid, message.author.member_openid)
-    motdRet = await queryIsBlockMotd(message.group_openid)
-    if (not adminRet) and motdRet:
-        await message.reply(content="本群已屏蔽Motd")
+    motd_args = motd_service.ParseParams(params)
+    if motd_args is None:
+        await message.reply(content=MOTD_USAGE_TEXT)
         return True
-
-    paramsList = splitCommandParams(params)
-    url=""
-    platform="auto"
-
-    if len(paramsList) == 1: #纯地址
-        url = paramsList[0]
-    elif len(paramsList) == 2: #地址+平台
-        url = paramsList[0]
-        platform = paramsList[1]
-    else:
-        await message.reply(content="Motd参数不正确\n使用方法:/motd <url> <platform>\nurl(必填):指定的服务器地址\nplatform(选填):<je|be>")
-        return True
-
-    # 提示已发起验证
-    await message.reply(content=f"已发起Motd请求，请稍等...")
-    
-    motd_instance = Motd(url)
-    if not motd_instance.is_valid():
-        await message.reply(content=f"服务器地址参数不正确",msg_seq=2)
-        return True
-
-
-
-    motdData = motd_instance.motd(platform)
-    failedText= ('❌无法获取服务器状态信息。\n'
-                '⚠️原因可能有以下几种：\n'
-                '1.服务器没有开启或已经关闭或不允许获取motd\n'
-                '2.描述(motd)中含有链接，官方机器人不允许发送没有授权的链接\n'
-                '3.指定的平台错误(je,be,auto)(不填默认auto)\n'
-                '4.ip或端口输入错误，或者接口维护这个可以问问机器人主人😝')
-    offlineFailedText = ('❌无法获取服务器状态信息。\n'
-                  '⚠️状态检测为Offline：\n'
-                  '1.服务器没有开启或已经关闭或不允许获取motd\n'
-                  '2.指定的平台错误(je,be,auto)(不填默认auto)\n'
-                  '3.ip或端口输入错误，或者接口维护这个可以问问机器人主人😝')
-    
-    if motdData.get('online'):
-        try:
-            uploadMedia = await api.post_group_file(message.group_openid,1,motdData.get("imgUrl"),False)
-            await api.post_group_message(
-                group_openid=message.group_openid,
-                msg_type=7,
-                msg_id=message.id, 
-                content=apply_sensitive_filter(motdData.get('text')),
-                media=uploadMedia,
-                msg_seq=2
-            )
-        except Exception as e:
-            _log.error(f"Error sending MOTD data: {e}")
-            await message.reply(content=failedText,msg_seq=2)
-
-    else:
-        await message.reply(content=offlineFailedText,msg_seq=2)
+    await motd_service.SendMotdResponse(motd_args[0], motd_args[1])
     return True
+
 
 @Commands("unblockMotd")
-async def unblockMotd(api: BotAPI, message: GroupMessage, params=None):
-    adminRet = await queryIsAdmin(message.group_openid, message.author.member_openid)
-    if not adminRet:
-        await message.reply(content="你没有足够的权限.")
+async def UnblockMotd(api: BotAPI, message: GroupMessage, params=None):
+    """解除当前群对 Motd 功能的屏蔽。"""
+    guard_service = CommandGuardService(message)
+    if not await guard_service.RequireAdmin():
         return True
-    ret = await delBlockMotd(message.group_openid)
+    ret = await MotdBlockRepositoryInstance.RemoveBlock(message.group_openid)
     if ret:
-        await message.reply(content=f"本群已设置为:解除屏蔽Motd.")
+        await message.reply(content="本群已设置为:解除屏蔽Motd.")
     return True
+
 
 @Commands("blockMotd")
-async def blockMotd(api: BotAPI, message: GroupMessage, params=None):
-    adminRet = await queryIsAdmin(message.group_openid, message.author.member_openid)
-    if not adminRet:
-        await message.reply(content="你没有足够的权限.")
+async def BlockMotd(api: BotAPI, message: GroupMessage, params=None):
+    """屏蔽当前群对 Motd 功能的访问。"""
+    guard_service = CommandGuardService(message)
+    if not await guard_service.RequireAdmin():
         return True
-    ret = await addBlockMotd(message.group_openid)
+    ret = await MotdBlockRepositoryInstance.AddBlock(message.group_openid)
     if ret:
-        await message.reply(content=f"本群已设置为:屏蔽Motd.")
+        await message.reply(content="本群已设置为:屏蔽Motd.")
     return True
+
 
 @Commands("解除认证")
-async def unauthQQAvatar(api: BotAPI, message: GroupMessage, params=None):
-    if not _config_manager.get('EnableAuth', ConfigManager.DEFAULT_ENABLE_AUTH):
-        await message.reply(content="认证功能未启用")
+async def UnauthQQAvatar(api: BotAPI, message: GroupMessage, params=None):
+    """解除指定 OpenId 的 QQ 认证绑定。"""
+    guard_service = CommandGuardService(message)
+    if not await guard_service.EnsureAuthReady():
         return True
-
-    ret = await queryBindServerByGroup(message.group_openid)
-    if ret is None:
-        await message.reply(content=f"您还未绑定服务器，请按说明进行绑定.")
+    if not await guard_service.RequireAdmin():
         return True
-    targetOpenId = params
-    adminRet = await queryIsAdmin(message.group_openid, message.author.member_openid)
-    if not adminRet:
-        await message.reply(content="你没有足够的权限.")
-        return True
-
-    if targetOpenId:
-        ret = await delBindQQById(message.group_openid,targetOpenId)
-        if ret:
-            await message.reply(content=f"✅ 解除认证成功！已为{targetOpenId}解除绑定QQ账号")
-        else:
-            await message.reply(content=f"❌ 解除认证失败！请检查输入的OpenId是否正确")
-    else:
-        await message.reply(content=f"请输入要解除认证的OpenId")
-
-
+    auth_service = AuthCommandService(message, api)
+    await auth_service.HandleAuthUnbind(params)
     return True
+
 
 @Commands("认证")
-async def authQQAvatar(api: BotAPI, message: GroupMessage, params=None):
-    if not _config_manager.get('EnableAuth', ConfigManager.DEFAULT_ENABLE_AUTH):
-        await message.reply(content="认证功能未启用")
+async def AuthQQAvatar(api: BotAPI, message: GroupMessage, params=None):
+    """执行用户自助或管理员手动的 QQ 认证。"""
+    guard_service = CommandGuardService(message)
+    if not await guard_service.EnsureAuthReady():
         return True
 
-    ret = await queryBindServerByGroup(message.group_openid)
-    if ret is None:
-        await message.reply(content=f"您还未绑定服务器，请按说明进行绑定.")
+    auth_service = AuthCommandService(message, api)
+    param_list = SplitCommandParams(params)
+    if len(param_list) == 0:
+        await auth_service.HandleAuthStatusQuery(message.author.member_openid)
         return True
-    openId = message.author.member_openid
-    paramList = splitCommandParams(params)
-    if len(paramList) == 0:
-        ret = await queryBindQQ(message.group_openid, openId)
-
-        if ret is not None:
-            await message.reply(content=f'您已绑定QQ:{ret}\n如需解除请联系机器人管理员使用"/解除认证 {openId}"以解除认证')
-        else:
-            await message.reply(content=f'您暂未绑定QQ，请使用"/认证 <qq号>"进行绑定，例如"/认证 123456789"')
-
+    if len(param_list) == 1:
+        await auth_service.HandleSelfAuth(param_list[0])
         return True
-    elif len(paramList) == 1:
-        qqNum = paramList[0]
-        if is_valid_QQ(qqNum):
-            #检测是否绑定过
-            ret = await queryBindQQ(message.group_openid, openId)
-            if ret is not None:
-                await message.reply(content=f"您已绑定QQ:{ret}")
-                return True
-            app_id = _config_manager.get("AppId")
-            result = await compare_qq_avatars(app_id,qqNum, openId)
-            if result[1] == 0:
-                similarity = result[0]
-                similarity_percent = similarity * 100
 
-                if similarity >= 0.98:  # pHash 汉明距离 ≤ 1 即为同一张图
-                    await message.reply(content=f'✅ 认证通过！绑定信息如下\nOpenId:{openId}\nQQ账号:{qqNum}\n如绑定有误，请管理员输入"/解除认证 {openId}"')
-                    await addBindQQ(message.group_openid, openId, qqNum)
-                else:
-                    await message.reply(
-                        content=f'❌ 认证失败，当前匹配度：{similarity_percent:.2f}%（需≥98.00%）\n管理员可手动使用"/认证 {qqNum} {openId}"进行人工确认'
-                    )
-            else:
-                await message.reply(content=f'图像比对失败: 错误 ({result[1]}): {result[2]}\n管理员可手动使用"/认证 {qqNum} {openId}"进行人工确认')
-        else:
-            await message.reply(content=f"认证失败，请检查输入的QQ号是否正确")
-    elif len(paramList) > 1:
-        adminRet = await queryIsAdmin(message.group_openid, message.author.member_openid)
-        if not adminRet:
-            await message.reply(content="你没有足够的权限.")
-            return True
-        qqNum = paramList[0]
-        targetOpenId = paramList[1]
-
-        await message.reply(content=f"✅ 认证通过！已为{targetOpenId}绑定为QQ账号:{qqNum}")
-        await addBindQQ(message.group_openid, targetOpenId, qqNum)
-
-        #await message.reply(msg_type=2,markdown={},keyboard=KeyboardPayload(id="xxx"),msg_seq=2)
-
+    if not await guard_service.RequireAdmin():
+        return True
+    await auth_service.HandleAdminAuth(param_list[0], param_list[1])
     return True
 
-#BotPy主框架
 class BaseBotMixin:
+    """提供群消息分发与公共事件处理逻辑。"""
+
     @property
     def bot_api(self):
-        """统一获取API实例的接口"""
+        """统一返回当前客户端持有的 API 实例。"""
         if isinstance(self, WebHookClient):
             return self.api
-        elif isinstance(self, Client):
+        if isinstance(self, Client):
             return self.api
-        else:
-            raise AttributeError("无法获取API实例")
-    async def on_group_at_message_create(self, message:GroupMessage):
-        # 注册指令handler
+        raise AttributeError("无法获取API实例")
+
+    async def on_group_at_message_create(self, message: GroupMessage):
+        """分发群聊命令，并在未命中时转入自定义执行。"""
         handlers = [
-            getHelp,
-            addAllowList,
-            bind,
-            reCall,
-            setGroupName,
-            sendGameMsg,
-            sendCmd,
-            queryWl,
-            queryOnline,
-            queryClientList,
-            adminRunCommand,
-            runCommand,
-            queryInfo,
-            queryAdminCmd,
-            addAdminCmd,
-            delAdminCmd,
-            motd,
-            unblockMotd,
-            blockMotd,
-            unauthQQAvatar,
-            authQQAvatar,
+            GetHelp,
+            AddAllowList,
+            Bind,
+            unBind,
+            SetServer,
+            DeleteAllowList,
+            SetGroupName,
+            SendGameMessage,
+            SendCommand,
+            QueryWhiteList,
+            QueryOnline,
+            QueryClientList,
+            AdminRunCommand,
+            RunCommand,
+            QueryInfo,
+            QueryAdminCommand,
+            AddAdminCommand,
+            DelAdminCommand,
+            Motd,
+            UnblockMotd,
+            BlockMotd,
+            UnauthQQAvatar,
+            AuthQQAvatar,
         ]
-        #canContinue = False
         for handler in handlers:
             if await handler(api=self.bot_api, message=message):
                 return
 
-        #if not canContinue:
-        #    return
-        #处理消息
-        adminRet = await queryIsAdmin(message.group_openid, message.author.member_openid)
-        content = message.content
-
-        match = re.match(r"^\s*\/(\S+)(?:\s+(.*))?$", content)
+        admin_ret = await AdminRepositoryInstance.IsAdmin(message.group_openid, message.author.member_openid)
+        match = re.match(r"^\s*\/(\S+)(?:\s+(.*))?$", message.content)
         if match:
             command = match.group(1)
             params = match.group(2) or ""
-            #_log.info(f"cmd:{command+' '+params.strip()}")
-            await customRun(adminRet, self.bot_api, message, command+' '+params.strip())
-            
-        #无消息
+            await CustomRun(admin_ret, self.bot_api, message, command + " " + params.strip())
+
     async def on_message_audit_reject(self, message: MessageAudit):
+        """记录被平台审核拒绝的消息。"""
         if message.message_id is not None:
             _log.warning(f"消息：{message.audit_id} 审核未通过.")
 
     async def on_group_add_robot(self, event: GroupManageEvent):
-        botName = _config_manager.get('BotName', ConfigManager.DEFAULT_BOT_NAME)
+        """在机器人入群后发送欢迎和使用指引。"""
+        bot_name = _config_manager.Get("BotName", ConfigManager.DEFAULT_BOT_NAME)
         try:
-            uploadMedia = await self.bot_api.post_group_file(
+            upload_media = await self.bot_api.post_group_file(
                 event.group_openid,
                 1,
                 "https://pic.txssb.cn/docQrCode.png",
-                False
+                False,
             )
             await self.bot_api.post_group_message(
                 group_openid=event.group_openid,
                 msg_type=7,
-                #msg_id=message.id,
                 event_id=event.event_id,
-                content=f"欢迎使用{botName}，首次使用请根据文档中的快速开始进行配置，文档可扫描上方二维码或手动输入网址.\n操作过程中需要@我，如:@{botName} /绑定 xxx\n欢迎加入交流群：1005746321",
-                media=uploadMedia,
-                msg_seq=1
+                content=f"欢迎使用{bot_name}，首次使用请根据文档中的快速开始进行配置，文档可扫描上方二维码或手动输入网址.\n操作过程中需要@我，如:@{bot_name} /绑定 xxx\n欢迎加入交流群：1005746321",
+                media=upload_media,
+                msg_seq=1,
             )
-        except Exception as e:
-            _log.error(f"机器人入群欢迎消息发送失败: {e}")
+        except Exception as exc:
+            _log.error(f"机器人入群欢迎消息发送失败: {exc}")
             await self.bot_api.post_group_message(
                 group_openid=event.group_openid,
                 msg_type=0,
                 event_id=event.event_id,
-                content=f'欢迎使用{botName}，首次使用请根据文档中的快速开始进行配置,(图片发送失败,请稍后使用"@{botName} /帮助"进行查询)\n操作过程中需要@我，如:@{botName} /绑定 xxx\n欢迎加入交流群：1005746321',
+                content=f'欢迎使用{bot_name}，首次使用请根据文档中的快速开始进行配置,(图片发送失败,请稍后使用"@{bot_name} /帮助"进行查询)\n操作过程中需要@我，如:@{bot_name} /绑定 xxx\n欢迎加入交流群：1005746321',
             )
 
     async def on_interaction_create(self, interaction: Interaction):
-        #_log.info(interact
-        pass
+        """处理按钮交互回调。
+
+        result code: 0 成功 1 失败 2 频繁 3 重复 4 无权限 5 仅管理员
+        """
+        try:
+            interaction_data = interaction.data
+            resolved = interaction_data.resolved
+            button_data = json.loads(resolved.button_data)
+        except (json.JSONDecodeError, TypeError, AttributeError) as exc:
+            _log.warning(f"解析 interaction 按钮数据失败: {exc}")
+            await self.bot_api.on_interaction_result(interaction.id, 1)
+            return None
+
+        action_id = button_data.get("actionId", "")
+        server_id = button_data.get("serverId", "")
+
+        print(button_data)
+        print(_interaction_callbacks)
+
+        # 先查看回调（不移除），校验权限
+        entry = PeekInteractionCallback(action_id)
+        if entry is None:
+            _log.warning(f"无法获取 interaction 回调 [actionId={action_id}]")
+            await self.bot_api.on_interaction_result(interaction.id, 1)
+            return None
+
+        if entry.get("needAdmin", False):
+            group_openid = getattr(interaction, "group_openid", "")
+            group_member_openid = getattr(interaction, "group_member_openid", "")
+            if not group_openid or not group_member_openid:
+                _log.warning(f"无法获取 interaction 群/用户信息 [actionId={action_id}]")
+                await self.bot_api.on_interaction_result(interaction.id, 1)
+                return None
+            if not await AdminRepositoryInstance.IsAdmin(group_openid, group_member_openid):
+                await self.bot_api.on_interaction_result(interaction.id, 4)
+                return None
+
+        # 权限通过后再取出并执行
+        entry = PopInteractionCallback(action_id)
+        if entry is None:
+            _log.warning(f"无法获取 interaction 回调 [actionId={action_id}]")
+            await self.bot_api.on_interaction_result(interaction.id, 1)
+            return None
+
+        callback = entry.get("function")
+        if callback is not None:
+            try:
+                await callback(server_id)
+            except Exception as exc:
+                _log.error(f"按钮回调执行异常 [actionId={action_id}]: {exc}")
+
+        await self.bot_api.on_interaction_result(interaction.id, 0)
+        return None
 
 
-
-# 协议相关类定义
 class WsBotClient(BaseBotMixin, ymbotpy.Client):
-    """WebSocket模式客户端"""
+    """定义 WebSocket 模式下的 Bot 客户端。"""
+
     def __init__(self, *args, **kwargs):
-        # 设置需要的权限
+        """初始化长连接模式所需的 intents。"""
         self.intents = ymbotpy.Intents(
             public_messages=True,
             interaction=True,
-            message_audit=True
+            message_audit=True,
         )
         super().__init__(intents=self.intents or ymbotpy.Intents.none(), *args, **kwargs)
 
 
 class WebhookBotClient(BaseBotMixin, ymbotpy.WebHookClient):
-    """Webhook模式客户端"""
-    pass
-    
-# 开启BotPy客户端
-async def startClient(app_id:str, secret:str, sandbox:bool, webhook:bool):
-    ClientClass = WebhookBotClient if webhook else WsBotClient
+    """定义 Webhook 模式下的 Bot 客户端。"""
+
+
+async def StartClient(app_id: str, secret: str, sandbox: bool, webhook: bool):
+    """按运行模式启动 Bot 客户端。"""
+    client_class = WebhookBotClient if webhook else WsBotClient
     if webhook:
-        client = ClientClass(is_sandbox=sandbox)
+        client = client_class(is_sandbox=sandbox)
         ssl_keyfile = None
         ssl_certfile = None
-        if os.path.exists('ssl/private.key') and os.path.exists('ssl/public.crt'):
-            ssl_keyfile = 'ssl/private.key'
-            ssl_certfile = 'ssl/public.crt'
+        if os.path.exists("ssl/private.key") and os.path.exists("ssl/public.crt"):
+            ssl_keyfile = "ssl/private.key"
+            ssl_certfile = "ssl/public.crt"
             _log.info("使用SSL证书")
 
         await client.start(
@@ -1072,32 +1008,35 @@ async def startClient(app_id:str, secret:str, sandbox:bool, webhook:bool):
             ssl_certfile=ssl_certfile,
             ssl_keyfile=ssl_keyfile,
         )
-    else:
-        client = ClientClass(is_sandbox=sandbox)
-        await client.start(
-            appid=app_id,
-            secret=secret,
-        )
+        return client
+
+    client = client_class(is_sandbox=sandbox)
+    await client.start(appid=app_id, secret=secret)
     return client
 
-# 创建服务器实例的协程
-async def create_server(wsname: str, wsurl: str, wskey: str):
-    server_instance = WebsocketClient(wsname, wsurl, wskey)
-    serverManager.setWsServer(server_instance)
+
+async def CreateServer(ws_name: str, ws_url: str, ws_key: str):
+    """创建并注册 WebSocket 桥接实例。"""
+    server_instance = WebsocketClient(ws_name, ws_url, ws_key)
+    ServerManagerInstance.SetWsServer(server_instance)
     return server_instance
 
-# 启动WebSocket服务器的函数
-async def start_server(wsname: str, wsurl: str, wskey: str):
-    server = await create_server(wsname, wsurl, wskey)  # 获取服务器实例
-    await server.connect()
 
-# 主函数，用于启动WebSocket服务器
-async def main(app_id, secret, ws_key, bot_name, ws_url, sandbox, webhook):
-    server_coroutine = start_server(bot_name, ws_url, ws_key)  # 获取启动服务器的协程
-    client_coroutine = startClient(app_id, secret, sandbox, webhook)  # 获取启动客户端的协程
-    await asyncio.gather(server_coroutine, client_coroutine)  # 并发运行
+async def StartServer(ws_name: str, ws_url: str, ws_key: str):
+    """启动 WebSocket 桥接连接。"""
+    server = await CreateServer(ws_name, ws_url, ws_key)
+    if not await server.Connect():
+        await server.Reconnect()
 
-if __name__ == '__main__':
+
+async def Main(app_id, secret, ws_key, bot_name, ws_url, sandbox, webhook):
+    """并发启动桥接连接和 Bot 客户端。"""
+    server_coroutine = StartServer(bot_name, ws_url, ws_key)
+    client_coroutine = StartClient(app_id, secret, sandbox, webhook)
+    await asyncio.gather(server_coroutine, client_coroutine)
+
+
+if __name__ == "__main__":
     _log.info("请使用index.py启动")
 
     

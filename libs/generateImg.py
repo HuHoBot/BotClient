@@ -184,10 +184,11 @@ def generate_img(text,fileName="minecraft_styles_fixed"):
     """
     生成图片并保存为文件
     """
-    font_path = _config_manager.get('TtfPath', ConfigManager.DEFAULT_TTF_PATH)
+    font_path = _config_manager.Get('TtfPath', ConfigManager.DEFAULT_TTF_PATH)
     image = render_mc_text(text, font_path, font_size=30, max_line_width=1000, scale=10)
     image.save("imgs/"+fileName+".png")
-    return "imgs/"+fileName+".png"
+    width,height = image.size
+    return {"fileName":"imgs/"+fileName+".png","width":width,"height":height}
 
 # 调用示例（确保§格式正确）
 if __name__ == "__main__":

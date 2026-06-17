@@ -16,6 +16,7 @@ help.*
 /test/
 sensitive-words/*.txt
 CLAUDE.md
+AGENTS.md
 .claude/*
 *.ttf
 

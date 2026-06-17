@@ -57,6 +57,13 @@ const server = http.createServer((req, res) => {
             res.end('File not found');
             return;
         }
+
+        let exceptFile = ["compare"]
+        if (exceptFile.includes(path.basename(filePath))) {
+            res.writeHead(403, { 'Content-Type': 'text/plain' });
+            res.end('Access denied');
+            return;
+        }
         
         // 检查是否为文件
         fs.stat(filePath, (err, stats) => {
