@@ -932,8 +932,8 @@ class BaseBotMixin:
         action_id = button_data.get("actionId", "")
         server_id = button_data.get("serverId", "")
 
-        print(button_data)
-        print(_interaction_callbacks)
+        #print(button_data)
+        #print(_interaction_callbacks)
 
         # 先查看回调（不移除），校验权限
         entry = PeekInteractionCallback(action_id)

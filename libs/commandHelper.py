@@ -292,9 +292,9 @@ async def SendServerSelectorWithCallback(
     markdown, keyboard = payload
     await api.post_group_message(
             group_openid=message.group_openid,
-            msg_type=3,
+            msg_type=2,
             msg_id=message.id,
-            msg_seq=1,
+            msg_seq=3,
             markdown=markdown,
             keyboard=keyboard,
     )
