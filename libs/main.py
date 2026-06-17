@@ -853,6 +853,7 @@ class BaseBotMixin:
             Bind,
             unBind,
             SetServer,
+            RenameServer,
             DeleteAllowList,
             SetGroupName,
             SendGameMessage,
