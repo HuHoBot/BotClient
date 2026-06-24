@@ -7,6 +7,7 @@ from ymbotpy import BotAPI, logging
 from ymbotpy.message import GroupMessage
 from ymbotpy.types.message import MarkdownPayload
 
+from libs.repositories import BindRepositoryInstance
 from libs.SensitiveFilter import ApiSensitiveFilter
 from libs.configManager import ConfigManager
 from libs.generateImg import generate_img
@@ -15,7 +16,7 @@ from libs.markdownManager import mdManager
 MAX_CALLBACK_MSG_SEQ = 5
 COMMAND_CALLBACK_PREFIX = "[消息回报]"
 CALLBACK_MARKDOWN_TEMPLATE = "callback"
-CHAT_MESSAGE_PREFIX = "[聊天消息]"
+CHAT_MESSAGE_PREFIX = "[{msgType}消息]"
 CHAT_MESSAGE_EXPIRE_SECONDS = 5 * 60
 
 _log = logging.get_logger()
@@ -211,14 +212,38 @@ class ChatRelayManager:
         )
         return True
 
-    async def BroadcastChat(self, server_id: str, msg: str):
+    async def BroadcastChat(self, server_id: str, msg: str, msgType: str="聊天"):
+        #print(f"BroadcastChat: {server_id} {msg}")
         """把游戏聊天转发到指定服务器绑定过的群聊中。"""
-        if server_id not in self._message_cache or self._bot_api is None:
+        if self._bot_api is None:
             return False
+
+        content = f"{CHAT_MESSAGE_PREFIX.replace("{msgType}", msgType)}\n{ApplySensitiveFilter(msg)}"
+
+        # 1) 第一遍：遍历绑定群直接发送，失败收集到重试列表
+        failed_groups: list[str] = []
+        bindings = await BindRepositoryInstance.GetByServerId(server_id)
+        if bindings:
+            for row in bindings:
+                group_id = row[0]
+                try:
+                    await self._bot_api.post_group_message(
+                        group_openid=group_id,
+                        content=content,
+                    )
+                except Exception as e:
+                    #_log.error(f"群 {group_id} 发送失败: {e}")
+                    failed_groups.append(group_id)
+
+        # 2) 第二遍：对失败群走缓存重试逻辑
+        if not failed_groups or server_id not in self._message_cache:
+            return len(failed_groups) < len(bindings) if bindings else False
 
         sent = False
         now = time.time()
         for group_id, msg_pool in self._message_cache[server_id].items():
+            if group_id not in failed_groups:
+                continue
             if not msg_pool:
                 continue
 
@@ -230,7 +255,7 @@ class ChatRelayManager:
                     try:
                         await self._bot_api.post_group_message(
                             group_openid=group_id,
-                            content=f"{CHAT_MESSAGE_PREFIX}\n{ApplySensitiveFilter(msg)}",
+                            content=content,
                             msg_id=msg_obj["msg_id"],
                             msg_seq=msg_obj["current_seq"],
                         )

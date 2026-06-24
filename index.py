@@ -1,7 +1,10 @@
 import argparse
 import asyncio
 import json
+import os
 import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'libs'))
 
 from ymbotpy import logging as botpy_logging
 
@@ -9,6 +12,7 @@ import libs.audit as BotAudit
 import libs.main as BotMain
 from libs.configManager import ConfigManager
 from libs.repositories import InitDb
+from libs.messageLogger import CleanOldMessages
 
 _log = botpy_logging.get_logger()
 
@@ -73,6 +77,7 @@ if __name__ == '__main__':
 
     try:
         asyncio.run(InitDb())
+        CleanOldMessages()
     except Exception as e:
         _log.error(f"数据库初始化失败: {str(e)}")
         sys.exit("数据库初始化失败，请检查data目录和数据库权限")

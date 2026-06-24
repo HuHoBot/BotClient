@@ -11,6 +11,7 @@ from ymbotpy.types.inline import Action, Button, Keyboard, KeyboardRow, Permissi
 from ymbotpy.types.message import KeyboardPayload, MarkdownPayload
 
 from libs.basic import IsValidQQ
+from libs.chatService import ApplySensitiveFilter
 from libs.configManager import ConfigManager
 from libs.keyboardManager import KeyboardPayloadFromJson
 from libs.markdownManager import mdManager
@@ -32,11 +33,12 @@ class CommandGuardService:
         """绑定当前命令所属的群消息。"""
         self.message = message
 
-    async def RequireAdmin(self) -> bool:
+    async def RequireAdmin(self,onlyCheck=False) -> bool:
         """校验当前消息发送者是否为群管理员。"""
         if await AdminRepositoryInstance.IsAdmin(self.message.group_openid, self.message.author.member_openid):
             return True
-        await self.message.reply(content=PERMISSION_DENIED_TEXT)
+        if not onlyCheck:
+            await self.message.reply(content=PERMISSION_DENIED_TEXT)
         return False
 
     async def GetBoundServer(self) -> list[str]:
@@ -222,9 +224,20 @@ class AuthCommandService:
 _interaction_callbacks: dict[str, dict[str, Any]] = {}
 
 
-def RegisterInteractionCallback(action_id: str, callback: Callable[..., Awaitable[Any]], need_admin: bool = False):
+def RegisterInteractionCallback(
+        group_id: str,
+        user_id: str,
+        action_id: str,
+        callback: Callable[..., Awaitable[Any]],
+        need_admin: bool = False
+    ):
     """注册按钮交互回调。"""
-    _interaction_callbacks[action_id] = {"needAdmin": need_admin, "function": callback}
+    _interaction_callbacks[action_id] = {
+        "needAdmin": need_admin,
+        "function": callback,
+        "group_id": group_id,
+        "user_id": user_id,
+    }
 
 
 def PeekInteractionCallback(action_id: str) -> dict[str, Any] | None:
@@ -258,7 +271,9 @@ async def BuildServerSelectorPayload(
         for j in range(i, min(i + 2, len(bind_ret))):
             server_id = bind_ret[j][1]
             server_name = await BindRepositoryInstance.GetServerName(group_openid, server_id) or "未命名服务器"
-            server_list_lines.append(f"**{server_name}**:`{server_id}`")
+            server_name = ApplySensitiveFilter(server_name)
+            masked_id = f"{server_id[:4]}{'*' * 6}{server_id[-3:]}" if len(server_id) >= 7 else server_id
+            server_list_lines.append(f"**{server_name}**:`{masked_id}`")
 
             buttons.append(
                 Button(
@@ -281,6 +296,7 @@ async def SendServerSelectorWithCallback(
     api:BotAPI,
     message:GroupMessage,
     action_id: str,
+    needAdmin: bool,
     callback: Callable[..., Awaitable[Any]],
     markdown_text: str = "# 选择服务器\n请点击下方按钮选择要操作的服务器",
 ):
@@ -294,11 +310,16 @@ async def SendServerSelectorWithCallback(
             group_openid=message.group_openid,
             msg_type=2,
             msg_id=message.id,
-            msg_seq=3,
+            msg_seq=5,
             markdown=markdown,
             keyboard=keyboard,
     )
-    RegisterInteractionCallback(action_id, callback)
+    RegisterInteractionCallback(
+            message.group_openid,
+            message.author.member_openid,
+            action_id,
+            callback,
+            needAdmin)
     return True
 
 
@@ -330,7 +351,7 @@ def BuildServerActionPayload(server_id: str, server_name: str):
             ),
         ]
     )
-    markdown = MarkdownPayload(content=f"# 操作服务器\n**{server_name}** ({server_id})")
+    markdown = MarkdownPayload(content=f"# 操作服务器\n**{ApplySensitiveFilter(server_name)}** ({server_id})")
     return markdown, KeyboardPayload(content=Keyboard(rows=[row]))
 
 
@@ -345,4 +366,5 @@ __all__ = [
     "PopInteractionCallback",
     "RegisterInteractionCallback",
     "SERVER_NOT_BOUND_TEXT",
+    "SendServerSelectorWithCallback",
 ]

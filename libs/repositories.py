@@ -176,6 +176,13 @@ async def InitDb():
             )
             """
         )
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS fullAmount (
+                `group` TEXT PRIMARY KEY
+            )
+            """
+        )
         await db.commit()
 
 
@@ -525,12 +532,62 @@ class AuthRepository:
             await session.Close()
 
 
+class FullAmountRepository:
+    """负责管理群级别的全量转发模式。"""
+
+    def __init__(self, db_path: str = DATABASE_PATH):
+        """记录仓储使用的数据库路径。"""
+        self.db_path = db_path
+
+    async def IsEnabled(self, group_id: str) -> bool:
+        """判断当前群是否开启了全量转发。"""
+        session = SQLiteSession(self.db_path)
+        await session.Connect()
+        try:
+            rows = await session.FetchAll(
+                "SELECT 1 FROM fullAmount WHERE `group` = ?",
+                (group_id,),
+            )
+        finally:
+            await session.Close()
+        return len(rows) > 0
+
+    async def Enable(self, group_id: str):
+        """为群开启全量转发模式。"""
+        session = SQLiteSession(self.db_path)
+        await session.Connect()
+        try:
+            await session.Execute(
+                "INSERT OR REPLACE INTO fullAmount (`group`) VALUES (?)",
+                (group_id,),
+            )
+            await session.Commit()
+        finally:
+            await session.Close()
+        return True
+
+    async def Disable(self, group_id: str):
+        """为群关闭全量转发模式。"""
+        session = SQLiteSession(self.db_path)
+        await session.Connect()
+        try:
+            await session.Execute(
+                "DELETE FROM fullAmount WHERE `group` = ?",
+                (group_id,),
+            )
+            await session.Commit()
+        finally:
+            await session.Close()
+        return True
+
+
 PendingBindStoreInstance = PendingBindStore()
 BindRepositoryInstance = BindRepository()
 AdminRepositoryInstance = AdminRepository()
 NicknameRepositoryInstance = NicknameRepository()
 MotdBlockRepositoryInstance = MotdBlockRepository()
 AuthRepositoryInstance = AuthRepository()
+FullAmountRepositoryInstance = FullAmountRepository()
 
 
 __all__ = [
@@ -541,6 +598,8 @@ __all__ = [
     "BindRepository",
     "BindRepositoryInstance",
     "DATABASE_PATH",
+    "FullAmountRepository",
+    "FullAmountRepositoryInstance",
     "InitDb",
     "MotdBlockRepository",
     "MotdBlockRepositoryInstance",

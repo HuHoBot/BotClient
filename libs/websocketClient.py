@@ -27,6 +27,7 @@ class WebsocketEvent:
         self.QueryOnlineList = "queryOnline"
         self.CustomRun = "run"
         self.CustomRunAdmin = "runAdmin"
+        self.GroupMember = "groupMember"
 
 
 class BotClientSendEvent:
@@ -204,7 +205,8 @@ class WebsocketClient:
         """把服务端聊天广播回各群。"""
         server_id = body.get("serverId", "")
         msg = body.get("msg")
-        await ChatManager.BroadcastChat(server_id, msg)
+        msgType = body.get("msgType","聊天")
+        await ChatManager.BroadcastChat(server_id, msg, msgType)
 
     async def ProcessMessage(self, message):
         """解析并分发收到的 WebSocket 消息。"""

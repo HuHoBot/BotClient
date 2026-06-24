@@ -34,7 +34,8 @@ def SplitCommandParams(params: str):
         for word in current_quote.split():
             result.append(word)
 
-    return [item.replace('"', "") for item in result]
+    result = [item.replace('"', "") for item in result]
+    return [ExtractMentionId(item) for item in result]
 
 
 def IsValidQQ(qq_str: str):
@@ -100,7 +101,14 @@ def GetQLogoUrl(app_id: str, open_id: str, size: int = 640):
     return f"https://q.qlogo.cn/qqapp/{app_id}/{open_id}/{size}"
 
 
+def ExtractMentionId(text: str):
+    """从 `<@ID>` 格式中提取中间的 ID，无匹配时返回原文本。"""
+    m = re.match(r"^<@([A-Fa-f0-9]+)>$", text.strip())
+    return m.group(1) if m else text
+
+
 __all__ = [
+    "ExtractMentionId",
     "GenerateHashKey",
     "GenerateRandomCode",
     "GetQLogoUrl",

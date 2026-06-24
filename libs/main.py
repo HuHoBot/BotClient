@@ -7,25 +7,23 @@ import re
 import uuid
 
 import ymbotpy
+from libs.ymbotpy.manage import GroupMemberEvent
 from ymbotpy import BotAPI, Client, WebHookClient, logging
-from ymbotpy.ext.command_util import Commands
+from libs.command_util import Commands
 from ymbotpy.interaction import Interaction
 from ymbotpy.manage import GroupManageEvent
 from ymbotpy.message import GroupMessage, MessageAudit
-from ymbotpy.types.inline import Keyboard, Button, RenderData, Action, Permission, KeyboardRow
-from ymbotpy.types.message import MarkdownPayload, KeyboardPayload
 
-from libs.basic import GenerateRandomCode, GetQLogoUrl, IsGuid, IsNumber, SplitCommandParams, TryParseJson
+from libs.basic import (ExtractMentionId, GenerateRandomCode, GetQLogoUrl, IsGuid, IsNumber, SplitCommandParams,
+                        TryParseJson, )
 from libs.chatService import ApplySensitiveFilter, ChatManager, COMMAND_CALLBACK_PREFIX, MessageReplyService
 from libs.commandHelper import (
     AuthCommandService,
     BuildServerActionPayload,
-    BuildServerSelectorPayload,
     CommandGuardService,
     PeekInteractionCallback,
     PERMISSION_DENIED_TEXT,
     PopInteractionCallback,
-    RegisterInteractionCallback,
     SendServerSelectorWithCallback,
 )
 from libs.configManager import ConfigManager
@@ -34,11 +32,13 @@ from libs.repositories import (
     AdminRepositoryInstance,
     AuthRepositoryInstance,
     BindRepositoryInstance,
+    FullAmountRepositoryInstance,
     MotdBlockRepositoryInstance,
     NicknameRepositoryInstance,
     PendingBindStoreInstance,
 )
 from libs.websocketClient import WebsocketClient, WebsocketEventSet
+from libs.messageLogger import CleanOldMessages, LogSentMessage, current_server_id
 
 _log = logging.get_logger()
 _config_manager = ConfigManager()
@@ -118,7 +118,7 @@ async def AddAllowList(api: BotAPI, message: GroupMessage, params=None):
     unique_id = str(uuid.uuid4())
 
     async def run(server_id: str):
-
+        current_server_id.set(server_id)
         server_instance = ServerManagerInstance.GetWsServer()
         reply_service = MessageReplyService(api, message)
         server_instance.AddCallbackFunc(unique_id, reply_service.CreateTextReplyCallback())
@@ -139,7 +139,7 @@ async def AddAllowList(api: BotAPI, message: GroupMessage, params=None):
     if len(bind_server) == 1:
         await run(bind_server[0])
     elif len(bind_server) > 1:
-        await SendServerSelectorWithCallback(api, message, unique_id, run)
+        await SendServerSelectorWithCallback(api, message, unique_id, True, run)
     return True
 
 
@@ -156,7 +156,7 @@ async def DeleteAllowList(api: BotAPI, message: GroupMessage, params=None):
     unique_id = str(uuid.uuid4())
 
     async def run(server_id: str):
-
+        current_server_id.set(server_id)
         server_instance = ServerManagerInstance.GetWsServer()
         reply_service = MessageReplyService(api, message)
         server_instance.AddCallbackFunc(unique_id, reply_service.CreateTextReplyCallback())
@@ -175,7 +175,7 @@ async def DeleteAllowList(api: BotAPI, message: GroupMessage, params=None):
     if len(bind_server) == 1:
         await run(bind_server[0])
     elif len(bind_server) > 1:
-        await SendServerSelectorWithCallback(api, message, unique_id, run)
+        await SendServerSelectorWithCallback(api, message, unique_id, True, run)
     return True
 
 @Commands("绑定")
@@ -194,6 +194,7 @@ async def Bind(api: BotAPI, message: GroupMessage, params=None):
             server_name = await BindRepositoryInstance.GetServerName(message.group_openid, server_id)
             if server_name is None:
                 server_name = "未命名服务器"
+            server_name = ApplySensitiveFilter(server_name)
             lines.append(f"名称: {server_name}")
             lines.append(f"ID: {server_id}")
         await message.reply(content="\n".join(lines))
@@ -213,7 +214,9 @@ async def Bind(api: BotAPI, message: GroupMessage, params=None):
     server_id = params_list[0]
     guard_service = CommandGuardService(message)
     bind_ret = await BindRepositoryInstance.GetByGroup(message.group_openid)
-    if bind_ret is not None and not await guard_service.RequireAdmin():
+    isAdmin = await guard_service.RequireAdmin(True)
+
+    if (len(bind_ret) != 0) and (not isAdmin):
         return True
 
     unique_id = str(uuid.uuid4())
@@ -265,6 +268,7 @@ async def unBind(api: BotAPI, message: GroupMessage, params=None):
         await SendServerSelectorWithCallback(
             api, message,
             str(uuid.uuid4()),
+            True,
             do_unbind,
             markdown_text="# 选择要解绑的服务器\n请点击下方按钮",
         )
@@ -317,7 +321,7 @@ async def SetServer(api: BotAPI, message: GroupMessage, params=None):
         return True
 
     unique_id = str(uuid.uuid4())
-    await SendServerSelectorWithCallback(api, message, unique_id, send_action_form)
+    await SendServerSelectorWithCallback(api, message, unique_id, True, send_action_form)
     return True
 
 
@@ -343,7 +347,7 @@ async def RenameServer(api: BotAPI, message: GroupMessage, params=None):
         return True
 
     await BindRepositoryInstance.SetServerName(message.group_openid, server_id, name)
-    await message.reply(content=f"已将该服务器重命名为: {name}")
+    await message.reply(content=f"已将该服务器重命名为: {ApplySensitiveFilter(name)}")
     return True
 
 
@@ -354,6 +358,7 @@ async def QueryInfo(api: BotAPI, message: GroupMessage, params=None):
     if params:
         if not await guard_service.RequireAdmin():
             return True
+        params = ExtractMentionId(params)
         bind_qq = await AuthRepositoryInstance.GetBoundQQ(message.group_openid, params)
         if bind_qq:
             await message.reply(content=f"此用户已绑定QQ:{bind_qq}")
@@ -366,7 +371,7 @@ async def QueryInfo(api: BotAPI, message: GroupMessage, params=None):
         nick = "未绑定昵称"
 
     await message.reply(
-        content=f"你的OpenId:{message.author.member_openid}\n群的OpenId:{message.group_openid}\n绑定的昵称:{ApplySensitiveFilter(nick)}"
+        content=f"你的OpenId:{message.author.member_openid}\n群的OpenId:{message.group_openid}"
     )
     return True
 
@@ -377,6 +382,7 @@ async def QueryAdminCommand(api: BotAPI, message: GroupMessage, params=None):
     guard_service = CommandGuardService(message)
     if not await guard_service.RequireAdmin():
         return True
+    params = ExtractMentionId(params)
     ret = await AdminRepositoryInstance.IsAdmin(message.group_openid, params)
     if ret:
         await message.reply(content="此人是管理员")
@@ -391,6 +397,12 @@ async def AddAdminCommand(api: BotAPI, message: GroupMessage, params=None):
     guard_service = CommandGuardService(message)
     if not await guard_service.RequireAdmin():
         return True
+    params = ExtractMentionId(params)
+
+    if params == "":
+        await message.reply(content="请指定要添加的管理员OpenId")
+        return True
+
     ret = await AdminRepositoryInstance.AddAdmin(message.group_openid, params)
     if ret:
         reply_service = MessageReplyService(api, message)
@@ -404,6 +416,12 @@ async def DelAdminCommand(api: BotAPI, message: GroupMessage, params=None):
     guard_service = CommandGuardService(message)
     if not await guard_service.RequireAdmin():
         return True
+    params = ExtractMentionId(params)
+
+    if params == "":
+        await message.reply(content="请指定要添加的管理员OpenId")
+        return True
+
     ret = await AdminRepositoryInstance.RemoveAdmin(message.group_openid, params)
     if ret:
         reply_service = MessageReplyService(api, message)
@@ -434,7 +452,7 @@ async def SetGroupName(api: BotAPI, message: GroupMessage, params=None):
         )
         if result:
             is_force_text = "强制" if force_edit else ""
-            await message.reply(content=f"已将{call_name}的群服互通昵称{is_force_text}设置为{ApplySensitiveFilter(nick)}")
+            await message.reply(content=f"已设置{is_force_text}群服互通昵称.")
         else:
             await message.reply(content="设置失败，该名称已被群内其他成员使用或被管理员强制锁定.")
 
@@ -480,6 +498,7 @@ async def SendGameMessage(api: BotAPI, message: GroupMessage, params=None):
     unique_id = str(uuid.uuid4())
 
     async def run(server_id:str):
+        current_server_id.set(server_id)
         ChatManager.SetBotApi(api)
         ChatManager.RememberMessage(server_id, message.group_openid, message.id, 1)
 
@@ -497,7 +516,7 @@ async def SendGameMessage(api: BotAPI, message: GroupMessage, params=None):
     if len(bind_server) == 1:
         await run(bind_server[0])
     elif len(bind_server) > 1:
-        await SendServerSelectorWithCallback(api, message, unique_id, run)
+        await SendServerSelectorWithCallback(api, message, unique_id, False, run)
     return True
 
 
@@ -511,7 +530,7 @@ async def SendCommand(api: BotAPI, message: GroupMessage, params=None):
     unique_id = str(uuid.uuid4())
 
     async def run(server_id:str):
-
+        current_server_id.set(server_id)
         server_instance = ServerManagerInstance.GetWsServer()
         reply_service = MessageReplyService(api, message)
 
@@ -552,7 +571,7 @@ async def SendCommand(api: BotAPI, message: GroupMessage, params=None):
     if len(bind_server) == 1:
         await run(bind_server[0])
     elif len(bind_server) > 1:
-        await SendServerSelectorWithCallback(api, message, unique_id, run)
+        await SendServerSelectorWithCallback(api, message, unique_id, True, run)
     return True
 
 
@@ -566,6 +585,7 @@ async def QueryWhiteList(api: BotAPI, message: GroupMessage, params=None):
     unique_id = str(uuid.uuid4())
 
     async def run(server_id:str):
+        current_server_id.set(server_id)
         payload = {}
         if params:
             if IsNumber(params):
@@ -590,7 +610,7 @@ async def QueryWhiteList(api: BotAPI, message: GroupMessage, params=None):
     if len(bind_server) == 1:
         await run(bind_server[0])
     elif len(bind_server) > 1:
-        await SendServerSelectorWithCallback(api, message, unique_id, run)
+        await SendServerSelectorWithCallback(api, message, unique_id, True, run)
     return True
 
 
@@ -603,7 +623,7 @@ async def QueryOnline(api: BotAPI, message: GroupMessage, params=None):
     unique_id = str(uuid.uuid4())
 
     async def run(server_id:str):
-
+        current_server_id.set(server_id)
         server_instance = ServerManagerInstance.GetWsServer()
         motd_service = MotdCommandService(api, message)
         server_instance.AddCallbackFunc(unique_id, motd_service.CreateOnlineReplyCallback())
@@ -621,7 +641,7 @@ async def QueryOnline(api: BotAPI, message: GroupMessage, params=None):
     if len(bind_server) == 1:
         await run(bind_server[0])
     elif len(bind_server) > 1:
-        await SendServerSelectorWithCallback(api, message, unique_id, run)
+        await SendServerSelectorWithCallback(api, message, unique_id, False, run)
     return True
 
 
@@ -652,7 +672,9 @@ async def QueryClientList(api: BotAPI, message: GroupMessage, params=None):
     )
     return True
 
-
+"""
+执行公共方法
+"""
 async def CustomRun(is_admin: bool, api: BotAPI, message: GroupMessage, params=None):
     """执行服务端自定义命令并处理流式回报。"""
     guard_service = CommandGuardService(message)
@@ -661,6 +683,7 @@ async def CustomRun(is_admin: bool, api: BotAPI, message: GroupMessage, params=N
     unique_id = str(uuid.uuid4())
 
     async def run(server_id:str):
+        current_server_id.set(server_id)
         params_list = SplitCommandParams(params)
         if len(params_list) < 1:
             await message.reply(content="参数不正确")
@@ -740,7 +763,7 @@ async def CustomRun(is_admin: bool, api: BotAPI, message: GroupMessage, params=N
     if len(bind_server) == 1:
         await run(bind_server[0])
     elif len(bind_server) > 1:
-        await SendServerSelectorWithCallback(api, message, unique_id, run)
+        await SendServerSelectorWithCallback(api, message, unique_id, True, run)
     return True
 
 
@@ -799,6 +822,36 @@ async def BlockMotd(api: BotAPI, message: GroupMessage, params=None):
     return True
 
 
+@Commands("全量")
+async def SetFullAmount(api: BotAPI, message: GroupMessage, params=None):
+    """开启或关闭本群的全量转发模式（开启后所有未命中指令的消息将自动转发到游戏）。"""
+    guard_service = CommandGuardService(message)
+    if not await guard_service.RequireAdmin():
+        return True
+
+    params_lower = params.strip().lower() if params else ""
+    if params_lower == "开":
+        await FullAmountRepositoryInstance.Enable(message.group_openid)
+        await message.reply(content="本群已开启全量转发模式。开启后，所有未命中指令的消息将自动转发到游戏。")
+    elif params_lower == "关":
+        await FullAmountRepositoryInstance.Disable(message.group_openid)
+        await message.reply(content="本群已关闭全量转发模式。")
+    else:
+        is_enabled = await FullAmountRepositoryInstance.IsEnabled(message.group_openid)
+        if is_enabled:
+            await message.reply(
+                content="本群当前处于全量转发模式（已开启）。"
+                        "使用 /全量 关 可关闭，/全量 开 可重新开启。"
+            )
+        else:
+            await message.reply(
+                content="本群当前未开启全量转发模式。"
+                        "使用 /全量 开 可开启——开启后，所有未命中指令的消息将自动转发到游戏。"
+                        "使用 /全量 关 可关闭。"
+            )
+    return True
+
+
 @Commands("解除认证")
 async def UnauthQQAvatar(api: BotAPI, message: GroupMessage, params=None):
     """解除指定 OpenId 的 QQ 认证绑定。"""
@@ -833,6 +886,26 @@ async def AuthQQAvatar(api: BotAPI, message: GroupMessage, params=None):
     await auth_service.HandleAdminAuth(param_list[0], param_list[1])
     return True
 
+"""
+广播群成员变动事件给Server
+"""
+async def BroadcastMemberEventPack2Server(action:str,event: GroupMemberEvent):
+    groupId = event.group_openid
+    memberId = event.member_openid
+    server_id_list = await BindRepositoryInstance.GetByGroup(groupId)
+    server_instance = ServerManagerInstance.GetWsServer()
+    """
+    for server_id in server_id_list:
+        await server_instance.SendMsgByServerId(
+                server_id,
+                WebsocketEventSet.GroupMember,
+                {
+                    "action": action,
+                    "groupId": groupId,
+                    "memberId": memberId,
+                },
+        )"""
+
 class BaseBotMixin:
     """提供群消息分发与公共事件处理逻辑。"""
 
@@ -845,8 +918,10 @@ class BaseBotMixin:
             return self.api
         raise AttributeError("无法获取API实例")
 
+    """群消息事件 AT 事件"""
     async def on_group_at_message_create(self, message: GroupMessage):
         """分发群聊命令，并在未命中时转入自定义执行。"""
+        ChatManager.SetBotApi(self.bot_api)
         handlers = [
             GetHelp,
             AddAllowList,
@@ -872,6 +947,7 @@ class BaseBotMixin:
             BlockMotd,
             UnauthQQAvatar,
             AuthQQAvatar,
+            SetFullAmount,
         ]
         for handler in handlers:
             if await handler(api=self.bot_api, message=message):
@@ -883,12 +959,37 @@ class BaseBotMixin:
             command = match.group(1)
             params = match.group(2) or ""
             await CustomRun(admin_ret, self.bot_api, message, command + " " + params.strip())
+            return
 
+        match_hash = re.match(r"^\s*#(.+)$", message.content)
+        if match_hash:
+            # print("match_hash",message.content)
+            chat_msg = match_hash.group(1).strip()
+            if chat_msg:
+                await SendGameMessage.__wrapped__(api=self.bot_api, message=message, params=chat_msg)
+                return
+
+        # 全量模式：本群开启全量转发后，未匹配指令的消息自动发送到游戏
+        if await FullAmountRepositoryInstance.IsEnabled(message.group_openid):
+            clean_content = re.sub(r'<@!?[^>]+>', '', message.content).strip().lstrip('/').strip()
+            if clean_content:
+                await SendGameMessage.__wrapped__(
+                    api=self.bot_api, message=message, params=clean_content
+                )
+            return
+
+    """群消息事件(无需@)"""
+    async def on_group_message_create(self, message: GroupMessage):
+        """处理群消息。"""
+        await self.on_group_at_message_create(message)
+
+    """消息审核不通过"""
     async def on_message_audit_reject(self, message: MessageAudit):
         """记录被平台审核拒绝的消息。"""
         if message.message_id is not None:
             _log.warning(f"消息：{message.audit_id} 审核未通过.")
 
+    """群聊添加Bot"""
     async def on_group_add_robot(self, event: GroupManageEvent):
         """在机器人入群后发送欢迎和使用指引。"""
         bot_name = _config_manager.Get("BotName", ConfigManager.DEFAULT_BOT_NAME)
@@ -903,7 +1004,7 @@ class BaseBotMixin:
                 group_openid=event.group_openid,
                 msg_type=7,
                 event_id=event.event_id,
-                content=f"欢迎使用{bot_name}，首次使用请根据文档中的快速开始进行配置，文档可扫描上方二维码或手动输入网址.\n操作过程中需要@我，如:@{bot_name} /绑定 xxx\n欢迎加入交流群：1005746321",
+                content=f"欢迎使用{bot_name}，首次使用请根据文档中的快速开始进行配置，文档可扫描上方二维码或手动输入网址.\n操作过程中需要@我(打开全量后无需@)，如:@{bot_name} /绑定 xxx\n欢迎加入交流群：1005746321\n建议按照文档操作打开机器人全量功能，主动消息体验效果更好!",
                 media=upload_media,
                 msg_seq=1,
             )
@@ -913,9 +1014,10 @@ class BaseBotMixin:
                 group_openid=event.group_openid,
                 msg_type=0,
                 event_id=event.event_id,
-                content=f'欢迎使用{bot_name}，首次使用请根据文档中的快速开始进行配置,(图片发送失败,请稍后使用"@{bot_name} /帮助"进行查询)\n操作过程中需要@我，如:@{bot_name} /绑定 xxx\n欢迎加入交流群：1005746321',
+                content=f'欢迎使用{bot_name}，首次使用请根据文档中的快速开始进行配置,(图片发送失败,请稍后使用"@{bot_name} /帮助"进行查询)\n操作过程中需要@我(打开全量后无需@)，如:@{bot_name} /绑定 xxx\n欢迎加入交流群：1005746321\n建议按照文档操作打开机器人全量功能，主动消息体验效果更好!',
             )
 
+    """互动(按钮)触发事件"""
     async def on_interaction_create(self, interaction: Interaction):
         """处理按钮交互回调。
 
@@ -938,21 +1040,30 @@ class BaseBotMixin:
 
         # 先查看回调（不移除），校验权限
         entry = PeekInteractionCallback(action_id)
+
         if entry is None:
             _log.warning(f"无法获取 interaction 回调 [actionId={action_id}]")
-            await self.bot_api.on_interaction_result(interaction.id, 1)
+            await self.bot_api.on_interaction_result(interaction.id, 3)
             return None
+
+        group_id = entry.get("group_id", "")
+        user_id = entry.get("user_id", "")
 
         if entry.get("needAdmin", False):
             group_openid = getattr(interaction, "group_openid", "")
             group_member_openid = getattr(interaction, "group_member_openid", "")
             if not group_openid or not group_member_openid:
-                _log.warning(f"无法获取 interaction 群/用户信息 [actionId={action_id}]")
+                #_log.warning(f"无法获取 interaction 群/用户信息 [actionId={action_id}]")
                 await self.bot_api.on_interaction_result(interaction.id, 1)
                 return None
             if not await AdminRepositoryInstance.IsAdmin(group_openid, group_member_openid):
                 await self.bot_api.on_interaction_result(interaction.id, 4)
                 return None
+
+        if group_id != interaction.group_openid or user_id != interaction.group_member_openid:
+            #_log.warning(f"用户权限校验失败 [actionId={action_id}]")
+            await self.bot_api.on_interaction_result(interaction.id, 4)
+            return None
 
         # 权限通过后再取出并执行
         entry = PopInteractionCallback(action_id)
@@ -971,6 +1082,16 @@ class BaseBotMixin:
         await self.bot_api.on_interaction_result(interaction.id, 0)
         return None
 
+    """群用户添加"""
+    async def on_group_member_add(self, event: GroupMemberEvent):
+        """处理群成员加入事件。"""
+        await BroadcastMemberEventPack2Server("add",event)
+
+    """群用户移除"""
+    async def on_group_member_remove(self, event: GroupMemberEvent):
+        """处理群成员移除事件。"""
+        await BroadcastMemberEventPack2Server("remove",event)
+
 
 class WsBotClient(BaseBotMixin, ymbotpy.Client):
     """定义 WebSocket 模式下的 Bot 客户端。"""
@@ -987,6 +1108,30 @@ class WsBotClient(BaseBotMixin, ymbotpy.Client):
 
 class WebhookBotClient(BaseBotMixin, ymbotpy.WebHookClient):
     """定义 Webhook 模式下的 Bot 客户端。"""
+
+
+def _install_message_logger():
+    """在 BotAPI 上安装消息日志钩子，拦截所有发往群的消息。"""
+    original_post = BotAPI.post_group_message
+
+    async def logged_post(self, group_openid="", msg_type=0, content="", **kwargs):
+        LogSentMessage(
+            group_openid=group_openid,
+            msg_type=msg_type,
+            content=content or "",
+        )
+        return await original_post(
+            self,
+            group_openid=group_openid,
+            msg_type=msg_type,
+            content=content,
+            **kwargs,
+        )
+
+    BotAPI.post_group_message = logged_post
+    _log.info("消息日志钩子已安装")
+
+_install_message_logger()
 
 
 async def StartClient(app_id: str, secret: str, sandbox: bool, webhook: bool):
