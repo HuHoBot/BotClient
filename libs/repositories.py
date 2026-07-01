@@ -183,6 +183,15 @@ async def InitDb():
             )
             """
         )
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS chatAllowList (
+                `groupId` TEXT NOT NULL PRIMARY KEY,
+                `groupNum` TEXT,
+                `qqNum` TEXT
+            )
+            """
+        )
         await db.commit()
 
 
@@ -581,6 +590,67 @@ class FullAmountRepository:
         return True
 
 
+class ChatAllowListRepository:
+    """负责管理聊天广播功能的群白名单。"""
+
+    def __init__(self, db_path: str = DATABASE_PATH):
+        """记录仓储使用的数据库路径。"""
+        self.db_path = db_path
+
+    async def IsAllowed(self, group_id: str) -> bool:
+        """判断当前群是否在聊天广播白名单中。"""
+        session = SQLiteSession(self.db_path)
+        await session.Connect()
+        try:
+            rows = await session.FetchAll(
+                "SELECT 1 FROM chatAllowList WHERE `groupId` = ?",
+                (group_id,),
+            )
+        finally:
+            await session.Close()
+        return len(rows) > 0
+
+    async def AddAllow(self, group_id: str, group_num: str = None, qq_num: str = None):
+        """将群加入聊天广播白名单，groupId 不可空缺。"""
+        session = SQLiteSession(self.db_path)
+        await session.Connect()
+        try:
+            await session.Execute(
+                "INSERT OR REPLACE INTO chatAllowList (`groupId`, `groupNum`, `qqNum`) VALUES (?, ?, ?)",
+                (group_id, group_num, qq_num),
+            )
+            await session.Commit()
+        finally:
+            await session.Close()
+        return True
+
+    async def RemoveAllow(self, group_id: str):
+        """将群从聊天广播白名单中移除。"""
+        session = SQLiteSession(self.db_path)
+        await session.Connect()
+        try:
+            await session.Execute(
+                "DELETE FROM chatAllowList WHERE `groupId` = ?",
+                (group_id,),
+            )
+            await session.Commit()
+        finally:
+            await session.Close()
+        return True
+
+    async def GetAllAllowed(self):
+        """获取所有聊天广播白名单记录，返回 (groupId, groupNum, qqNum) 列表。"""
+        session = SQLiteSession(self.db_path)
+        await session.Connect()
+        try:
+            rows = await session.FetchAll(
+                "SELECT `groupId`, `groupNum`, `qqNum` FROM chatAllowList",
+            )
+        finally:
+            await session.Close()
+        return rows if rows else []
+
+
 PendingBindStoreInstance = PendingBindStore()
 BindRepositoryInstance = BindRepository()
 AdminRepositoryInstance = AdminRepository()
@@ -588,6 +658,7 @@ NicknameRepositoryInstance = NicknameRepository()
 MotdBlockRepositoryInstance = MotdBlockRepository()
 AuthRepositoryInstance = AuthRepository()
 FullAmountRepositoryInstance = FullAmountRepository()
+ChatAllowListRepositoryInstance = ChatAllowListRepository()
 
 
 __all__ = [
@@ -597,6 +668,8 @@ __all__ = [
     "AuthRepositoryInstance",
     "BindRepository",
     "BindRepositoryInstance",
+    "ChatAllowListRepository",
+    "ChatAllowListRepositoryInstance",
     "DATABASE_PATH",
     "FullAmountRepository",
     "FullAmountRepositoryInstance",

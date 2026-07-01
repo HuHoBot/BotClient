@@ -1,6 +1,14 @@
+# -*- coding: utf-8 -*-
+
 import os
 import glob
-import requests
+
+from uapi import UapiClient
+from uapi.errors import UapiError
+
+from libs.configManager import ConfigManager
+
+_config_manager = ConfigManager()
 
 
 def _is_cjk(char):
@@ -14,7 +22,7 @@ class SimpleSensitiveFilter:
     # 匹配时跳过的干扰字符（空格、特殊符号等）
     SKIP_CHARS = set(" \t\r\n\u3000*·.,-_—–=+!@#$%^&()[]{}|/\\~`'\"""''；;：:，。、？?！!…")
     # 纯ASCII词的最小长度（过滤掉 "b"、"test" 这类过短的英文敏感词）
-    MIN_ASCII_LEN = 5
+    MIN_ASCII_LEN = 2
 
     def __init__(self, dir_path="sensitive-words"):
         self.trie = {}
@@ -25,6 +33,7 @@ class SimpleSensitiveFilter:
                     word = line.strip()
                     if word and self._should_add(word):
                         self._add_word(word)
+        print(f"Loaded {len(self.trie)} words")
 
     def _should_add(self, word):
         """判断敏感词是否应被加载，过滤不合理的词条"""
@@ -82,27 +91,44 @@ class SimpleSensitiveFilter:
 
 
 class ApiSensitiveFilter:
-    """基于在线API的违禁词检测"""
-    API_URL = "https://uapis.cn/api/v1/text/profanitycheck"
+    """基于 UAPI SDK 的违禁词检测，未配置 API key 或异常时回退到本地 Trie 过滤。"""
 
-    @staticmethod
-    def check(text):
-        """调用在线违禁词检测API，返回响应JSON"""
-        resp = requests.post(
-            ApiSensitiveFilter.API_URL,
-            json={"text": text},
-            timeout=5
-        )
-        return resp.json()
+    _client = None
+    _token = None
+    _local_filter = None
 
-    @staticmethod
-    def replace(text):
-        """检测并返回屏蔽后的文本，API异常时回退到本地Trie过滤"""
-        try:
-            result = ApiSensitiveFilter.check(text)
-            if result.get("status") == "forbidden":
-                return result.get("masked_text", text)
-        except Exception:
-            return SimpleSensitiveFilter().replace(text)
-        return text
+    @classmethod
+    def _get_local_filter(cls):
+        """懒加载本地 SimpleSensitiveFilter 单例。"""
+        if cls._local_filter is None:
+            cls._local_filter = SimpleSensitiveFilter()
+        return cls._local_filter
 
+    @classmethod
+    def _get_client(cls):
+        """懒加载 UapiClient，token 变化时重建。"""
+        token = _config_manager.Get("AuditApiKey", ConfigManager.DEFAULT_AUDIT_API_KEY)
+        if not token:
+            return None
+        if cls._token != token or cls._client is None:
+            cls._client = UapiClient("https://uapis.cn", token=token)
+            cls._token = token
+        return cls._client
+
+    @classmethod
+    def replace(cls, text: str) -> str:
+        """检测文本中的敏感词，命中时返回屏蔽后文本。
+
+        - 已配置 AuditApiKey 且 API 正常 → 使用在线检测
+        - 未配置 AuditApiKey 或 API 异常 → 回退到本地 Trie 过滤
+        """
+        client = cls._get_client()
+        if client is not None:
+            try:
+                result = client.min_gan_ci_shi_bie.post_sensitive_word_quick_check(text=text)
+                if result.get("status") == "forbidden":
+                    return result.get("masked_text", text)
+                return text
+            except UapiError:
+                pass
+        return cls._get_local_filter().replace(text)

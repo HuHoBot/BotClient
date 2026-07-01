@@ -7,7 +7,7 @@ from ymbotpy import BotAPI, logging
 from ymbotpy.message import GroupMessage
 from ymbotpy.types.message import MarkdownPayload
 
-from libs.repositories import BindRepositoryInstance
+from libs.repositories import BindRepositoryInstance, ChatAllowListRepositoryInstance
 from libs.SensitiveFilter import ApiSensitiveFilter
 from libs.configManager import ConfigManager
 from libs.generateImg import generate_img
@@ -226,6 +226,8 @@ class ChatRelayManager:
         if bindings:
             for row in bindings:
                 group_id = row[0]
+                if not await ChatAllowListRepositoryInstance.IsAllowed(group_id):
+                    continue
                 try:
                     await self._bot_api.post_group_message(
                         group_openid=group_id,

@@ -54,10 +54,13 @@ def IsNumber(data: str):
     return data.isdigit() and int(data) >= 0
 
 
-def IsGuid(data: str):
+def IsValidServerId(data: str):
     """判断字符串是否为 32 位十六进制标识。"""
-    return re.match(r"^[0-9a-fA-F]{32}$", data) is not None
+    return re.match(r"^(?=.*[a-f])(?=.*[0-9])[a-f0-9]{32}$", data) is not None
 
+def IsValidOpenId(open_id: str):
+    """校验输入是否为合法 OpenId。"""
+    return re.match(r'^(?=.*[A-F])(?=.*[0-9])[A-F0-9]{32}$', open_id) is not None
 
 def GenerateRandomCode():
     """生成四位数字验证码。"""
@@ -113,8 +116,9 @@ __all__ = [
     "GenerateRandomCode",
     "GetQLogoUrl",
     "GetServerConfig",
-    "IsGuid",
+    "IsValidServerId",
     "IsNumber",
+    "IsValidOpenId",
     "IsValidQQ",
     "IsValidXboxId",
     "SplitCommandParams",

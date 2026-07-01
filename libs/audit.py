@@ -1,12 +1,12 @@
 # -*- coding: utf-8 -*-
 import os
 
-import botpy
-from botpy import logging, BotAPI
+import ymbotpy
+from ymbotpy import logging, BotAPI
 
-from botpy.ext.command_util import Commands
-from botpy.message import GroupMessage
-from botpy.ext.cog_yaml import read
+from ymbotpy.ext.command_util import Commands
+from ymbotpy.message import GroupMessage
+from ymbotpy.ext.cog_yaml import read
 _log = logging.get_logger()
 
 
@@ -67,7 +67,7 @@ async def adminRunCommand(api: BotAPI, message: GroupMessage, params=None):
     await message.reply(content="执行成功")
     return True
 
-class MyClient(botpy.Client):
+class MyClient(ymbotpy.Client):
     async def on_group_at_message_create(self, message):
         # 注册指令handler
         handlers = [
@@ -89,7 +89,7 @@ class MyClient(botpy.Client):
 
 #订阅事件
 def main(APPID,SECRET):
-    intents = botpy.Intents.none()
+    intents = ymbotpy.Intents.none()
     intents.public_messages=True
 
     client = MyClient(intents=intents)

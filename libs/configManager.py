@@ -20,6 +20,8 @@ class ConfigData(TypedDict):
     EnableMotd: bool
     EnableAuth: bool
     EnableSensitiveFilter: bool
+    AuditApiKey: str
+    AdminId: list[str]
 
 
 class ConfigManager:
@@ -35,6 +37,8 @@ class ConfigManager:
     DEFAULT_ENABLE_AUTH = True
     DEFAULT_ENABLE_SENSITIVE_FILTER = True
     DEFAULT_GENERATE_IMG_URL = "http://127.0.0.1:2087/{IMGID}.png"
+    DEFAULT_AUDIT_API_KEY = ""
+    DEFAULT_ADMIN_ID = []
 
     def __init__(self, config_path: Optional[str] = None):
         """初始化配置管理器，并确定配置文件路径。"""
@@ -139,6 +143,8 @@ class ConfigManager:
             "EnableMotd": self._OptionalBool(data, "EnableMotd", self.DEFAULT_ENABLE_MOTD),
             "EnableAuth": self._OptionalBool(data, "EnableAuth", self.DEFAULT_ENABLE_AUTH),
             "EnableSensitiveFilter": self._OptionalBool(data, "EnableSensitiveFilter", self.DEFAULT_ENABLE_SENSITIVE_FILTER),
+            "AuditApiKey": self._OptionalStringAllowEmpty(data, "AuditApiKey", self.DEFAULT_AUDIT_API_KEY),
+            "AdminId": self._OptionalStringList(data, "AdminId", self.DEFAULT_ADMIN_ID),
         }
 
     def Load(self) -> ConfigData:
@@ -168,6 +174,8 @@ class ConfigManager:
         enable_motd: Optional[bool] = None,
         enable_auth: Optional[bool] = None,
         enable_sensitive_filter: Optional[bool] = None,
+        audit_api_key: Optional[str] = None,
+        admin_id: Optional[list[str]] = None,
     ) -> ConfigData:
         """保存配置到磁盘，并返回规范化后的配置对象。"""
         config = self.Validate({
@@ -187,6 +195,8 @@ class ConfigManager:
             "EnableMotd": enable_motd if enable_motd is not None else self.DEFAULT_ENABLE_MOTD,
             "EnableAuth": enable_auth if enable_auth is not None else self.DEFAULT_ENABLE_AUTH,
             "EnableSensitiveFilter": enable_sensitive_filter if enable_sensitive_filter is not None else self.DEFAULT_ENABLE_SENSITIVE_FILTER,
+            "AuditApiKey": audit_api_key if audit_api_key is not None else self.DEFAULT_AUDIT_API_KEY,
+            "AdminId": admin_id if admin_id is not None else list(self.DEFAULT_ADMIN_ID),
         })
 
         with self.config_path.open("w", encoding="utf-8") as file:

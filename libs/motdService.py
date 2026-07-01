@@ -126,6 +126,8 @@ class MotdClient:
         game_mode="Unknown",
     ):
         """组装 Motd Markdown 模板所需参数。"""
+        motd_text = ApplySensitiveFilter(motd_text)
+        level_name = ApplySensitiveFilter(level_name)
         return [
             MessageMarkdownParams(key="platform", values=[platform]),
             MessageMarkdownParams(key="motd_img_url", values=[motd_img_url]),

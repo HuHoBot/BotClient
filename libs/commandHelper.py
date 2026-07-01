@@ -10,7 +10,7 @@ from ymbotpy.message import GroupMessage
 from ymbotpy.types.inline import Action, Button, Keyboard, KeyboardRow, Permission, RenderData
 from ymbotpy.types.message import KeyboardPayload, MarkdownPayload
 
-from libs.basic import IsValidQQ
+from libs.basic import IsValidOpenId, IsValidQQ
 from libs.chatService import ApplySensitiveFilter
 from libs.configManager import ConfigManager
 from libs.keyboardManager import KeyboardPayloadFromJson
@@ -103,7 +103,7 @@ class AuthCommandService:
         result = await CompareQQAvatars(app_id, qq_num, open_id)
         if result[1] != 0:
             await self.message.reply(
-                content=f'图像比对失败: 错误 ({result[1]}): {result[2]}\n管理员可手动使用"/认证 {qq_num} {open_id}"进行人工确认'
+                content=ApplySensitiveFilter(f'图像比对失败: 错误 ({result[1]}): {str(result[2])}\n管理员可手动使用"/认证 {qq_num} {open_id}"进行人工确认')
             )
             return
 
@@ -204,6 +204,9 @@ class AuthCommandService:
 
     async def HandleAdminAuth(self, qq_num: str, target_open_id: str):
         """处理管理员手动确认的 QQ 认证绑定。"""
+        if not IsValidOpenId(target_open_id):
+            await self.message.reply(content="OpenId 输入有误")
+            return
         await self.message.reply(content=f"✅ 认证通过！已为{target_open_id}绑定为QQ账号:{qq_num}")
         await AuthRepositoryInstance.AddBinding(self.message.group_openid, target_open_id, qq_num)
 
@@ -211,6 +214,9 @@ class AuthCommandService:
         """处理管理员发起的 QQ 认证解绑。"""
         if not target_open_id:
             await self.message.reply(content="请输入要解除认证的OpenId")
+            return
+        if not IsValidOpenId(target_open_id):
+            await self.message.reply(content="OpenId 输入有误")
             return
 
         if await AuthRepositoryInstance.DeleteBindingByOpenId(self.message.group_openid, target_open_id):
@@ -271,14 +277,15 @@ async def BuildServerSelectorPayload(
         for j in range(i, min(i + 2, len(bind_ret))):
             server_id = bind_ret[j][1]
             server_name = await BindRepositoryInstance.GetServerName(group_openid, server_id) or "未命名服务器"
-            server_name = ApplySensitiveFilter(server_name)
             masked_id = f"{server_id[:4]}{'*' * 6}{server_id[-3:]}" if len(server_id) >= 7 else server_id
             server_list_lines.append(f"**{server_name}**:`{masked_id}`")
+            # Button label 截断防止过长，敏感词过滤在最终 markdown_content 统一处理
+            safe_label = server_name[:20]
 
             buttons.append(
                 Button(
                     id=str(i),
-                    render_data=RenderData(label=server_name, visited_label=server_name, style=1),
+                    render_data=RenderData(label=safe_label, visited_label=safe_label, style=1),
                     action=Action(
                         type=1,
                         permission=Permission(type=2),
@@ -289,7 +296,7 @@ async def BuildServerSelectorPayload(
         rows.append(KeyboardRow(buttons=buttons))
 
     server_list = "\n".join(server_list_lines)
-    markdown_content = f"{markdown_title}\n\n{server_list}"
+    markdown_content = ApplySensitiveFilter(f"{markdown_title}\n\n{server_list}")
     return MarkdownPayload(content=markdown_content), KeyboardPayload(content=Keyboard(rows=rows))
 
 async def SendServerSelectorWithCallback(
@@ -351,7 +358,7 @@ def BuildServerActionPayload(server_id: str, server_name: str):
             ),
         ]
     )
-    markdown = MarkdownPayload(content=f"# 操作服务器\n**{ApplySensitiveFilter(server_name)}** ({server_id})")
+    markdown = MarkdownPayload(content=ApplySensitiveFilter(f"# 操作服务器\n**{server_name}** ({server_id})"))
     return markdown, KeyboardPayload(content=Keyboard(rows=[row]))
 
 

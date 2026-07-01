@@ -12,10 +12,10 @@ from ymbotpy import BotAPI, Client, WebHookClient, logging
 from libs.command_util import Commands
 from ymbotpy.interaction import Interaction
 from ymbotpy.manage import GroupManageEvent
-from ymbotpy.message import GroupMessage, MessageAudit
+from ymbotpy.message import C2CMessage, GroupMessage, MessageAudit
 
-from libs.basic import (ExtractMentionId, GenerateRandomCode, GetQLogoUrl, IsGuid, IsNumber, SplitCommandParams,
-                        TryParseJson, )
+from libs.basic import (ExtractMentionId, GenerateRandomCode, GetQLogoUrl, IsValidServerId, IsNumber,
+                        SplitCommandParams, TryParseJson, )
 from libs.chatService import ApplySensitiveFilter, ChatManager, COMMAND_CALLBACK_PREFIX, MessageReplyService
 from libs.commandHelper import (
     AuthCommandService,
@@ -32,6 +32,7 @@ from libs.repositories import (
     AdminRepositoryInstance,
     AuthRepositoryInstance,
     BindRepositoryInstance,
+    ChatAllowListRepositoryInstance,
     FullAmountRepositoryInstance,
     MotdBlockRepositoryInstance,
     NicknameRepositoryInstance,
@@ -121,7 +122,7 @@ async def AddAllowList(api: BotAPI, message: GroupMessage, params=None):
         current_server_id.set(server_id)
         server_instance = ServerManagerInstance.GetWsServer()
         reply_service = MessageReplyService(api, message)
-        server_instance.AddCallbackFunc(unique_id, reply_service.CreateTextReplyCallback())
+        server_instance.AddCallbackFunc(unique_id, reply_service.CreateTextReplyCallback(use_sensitive_filter=True))
         ws_ret = await server_instance.SendMsgByServerId(
                 server_id,
                 WebsocketEventSet.AddWhiteList,
@@ -159,7 +160,7 @@ async def DeleteAllowList(api: BotAPI, message: GroupMessage, params=None):
         current_server_id.set(server_id)
         server_instance = ServerManagerInstance.GetWsServer()
         reply_service = MessageReplyService(api, message)
-        server_instance.AddCallbackFunc(unique_id, reply_service.CreateTextReplyCallback())
+        server_instance.AddCallbackFunc(unique_id, reply_service.CreateTextReplyCallback(use_sensitive_filter=True))
         ws_ret = await server_instance.SendMsgByServerId(
                 server_id,
                 WebsocketEventSet.DelWhiteList,
@@ -191,13 +192,10 @@ async def Bind(api: BotAPI, message: GroupMessage, params=None):
         lines = ["当前群已绑定服务器:"]
         for row in bind_ret:
             server_id = row[1]
-            server_name = await BindRepositoryInstance.GetServerName(message.group_openid, server_id)
-            if server_name is None:
-                server_name = "未命名服务器"
-            server_name = ApplySensitiveFilter(server_name)
+            server_name = await BindRepositoryInstance.GetServerName(message.group_openid, server_id) or "未命名服务器"
             lines.append(f"名称: {server_name}")
             lines.append(f"ID: {server_id}")
-        await message.reply(content="\n".join(lines))
+        await message.reply(content=ApplySensitiveFilter("\n".join(lines)))
         return True
 
     if len(params_list) < 1 or len(params_list) > 2:
@@ -222,9 +220,9 @@ async def Bind(api: BotAPI, message: GroupMessage, params=None):
     unique_id = str(uuid.uuid4())
     server_instance = ServerManagerInstance.GetWsServer()
     reply_service = MessageReplyService(api, message)
-    server_instance.AddCallbackFunc(unique_id, reply_service.CreateTextReplyCallback(error_prefix="绑定回复重试失败"))
+    server_instance.AddCallbackFunc(unique_id, reply_service.CreateTextReplyCallback(use_sensitive_filter=True, error_prefix="绑定回复重试失败"))
 
-    if IsGuid(server_id):
+    if IsValidServerId(server_id):
         bind_code = GenerateRandomCode()
         bind_req_ret = await server_instance.SendMsgByServerId(
             server_id,
@@ -275,6 +273,10 @@ async def unBind(api: BotAPI, message: GroupMessage, params=None):
         return True
 
     server_id = params_list[0]
+    if not IsValidServerId(server_id):
+        await message.reply(content="ServerId 输入有误")
+        return True
+
     bind_ret = await BindRepositoryInstance.GetByGroup(message.group_openid)
     if not bind_ret:
         await message.reply(content="当前群未绑定任何服务器，无需解绑。")
@@ -312,6 +314,10 @@ async def SetServer(api: BotAPI, message: GroupMessage, params=None):
     params_list = SplitCommandParams(params)
     if len(params_list) >= 1:
         server_id = params_list[0]
+        if not IsValidServerId(server_id):
+            await message.reply(content="ServerId 输入有误")
+            return True
+
         bind_ret = await BindRepositoryInstance.GetByGroup(message.group_openid)
         matched = any(row[1] == server_id for row in bind_ret)
         if not matched:
@@ -338,6 +344,10 @@ async def RenameServer(api: BotAPI, message: GroupMessage, params=None):
         return True
 
     server_id = params_list[0]
+    if not IsValidServerId(server_id):
+        await message.reply(content="ServerId 输入有误")
+        return True
+
     name = " ".join(params_list[1:])
 
     bind_ret = await BindRepositoryInstance.GetByGroup(message.group_openid)
@@ -488,6 +498,10 @@ async def SendGameMessage(api: BotAPI, message: GroupMessage, params=None):
     if bind_server is None:
         return True
 
+    # 全量转发模式下消息已自动转发，静默跳过
+    if await FullAmountRepositoryInstance.IsEnabled(message.group_openid):
+        return True
+
     nick = await NicknameRepositoryInstance.GetName(message.group_openid, message.author.member_openid)
     if nick is None:
         await message.reply(content="没有找到你的昵称数据，请使用/设置名称 <昵称>来设置")
@@ -539,8 +553,9 @@ async def SendCommand(api: BotAPI, message: GroupMessage, params=None):
             try:
                 text = packed_msg.get("text", "")
                 callback_convert = packed_msg.get("callbackConvert", 0)
+                filtered_text = ApplySensitiveFilter(text)
                 content, image_url, width, height = reply_service.BuildCommandCallbackPayload(
-                    text, unique_id, callback_convert
+                    text, unique_id, callback_convert, render_text=filtered_text
                     )
                 await reply_service.SendCallbackResponse(
                         content,
@@ -704,7 +719,7 @@ async def CustomRun(is_admin: bool, api: BotAPI, message: GroupMessage, params=N
                 msg_continue = is_dict and parsed_data.get("msgContinue", False)
 
                 if is_dict:
-                    content = f"{COMMAND_CALLBACK_PREFIX}\n{parsed_data.get('text', '无消息')}"
+                    content = f"{COMMAND_CALLBACK_PREFIX}\n{ApplySensitiveFilter(parsed_data.get('text', '无消息'))}"
                     image_url = parsed_data.get("imgUrl")
                     width = parsed_data.get("width", parsed_data.get("imgWidth", 0))
                     height = parsed_data.get("height", parsed_data.get("imgHeight", 0))
@@ -885,6 +900,50 @@ async def AuthQQAvatar(api: BotAPI, message: GroupMessage, params=None):
         return True
     await auth_service.HandleAdminAuth(param_list[0], param_list[1])
     return True
+
+
+@Commands("添加聊天白")
+async def C2C_AddChatAllowList(api: BotAPI, message: C2CMessage, params=None):
+    """C2C: 将群加入聊天广播白名单。"""
+    param_list = SplitCommandParams(params)
+    if not param_list:
+        await message.reply(content="参数不正确，格式: /添加聊天白名单 <groupId> [数字群号] [qqNum]")
+        return True
+    group_id = param_list[0]
+    group_num = param_list[1] if len(param_list) > 1 else None
+    qq_num = param_list[2] if len(param_list) > 2 else None
+    await ChatAllowListRepositoryInstance.AddAllow(group_id, group_num, qq_num)
+    await message.reply(content=f"已将群 {group_id} 加入聊天广播白名单。")
+    return True
+
+
+@Commands("删除聊天白")
+async def C2C_RemoveChatAllowList(api: BotAPI, message: C2CMessage, params=None):
+    """C2C: 将群从聊天广播白名单中移除。"""
+    param_list = SplitCommandParams(params)
+    if not param_list:
+        await message.reply(content="参数不正确，格式: /删除聊天白名单 <groupId>")
+        return True
+    group_id = param_list[0]
+    await ChatAllowListRepositoryInstance.RemoveAllow(group_id)
+    await message.reply(content=f"已将群 {group_id} 从聊天广播白名单中移除。")
+    return True
+
+
+@Commands("查看聊天白")
+async def C2C_ListChatAllowList(api: BotAPI, message: C2CMessage, params=None):
+    """C2C: 查看当前聊天广播白名单。"""
+    rows = await ChatAllowListRepositoryInstance.GetAllAllowed()
+    if not rows:
+        await message.reply(content="当前聊天广播白名单为空。")
+        return True
+    lines = ["当前聊天广播白名单:"]
+    for row in rows:
+        gid, gnum, qq = row[0], row[1] or "-", row[2] or "-"
+        lines.append(f"groupId: {gid}  数字群号: {gnum}  qqNum: {qq}")
+    await message.reply(content="\n".join(lines))
+    return True
+
 
 """
 广播群成员变动事件给Server
@@ -1092,6 +1151,22 @@ class BaseBotMixin:
         """处理群成员移除事件。"""
         await BroadcastMemberEventPack2Server("remove",event)
 
+    """C2C消息事件（私聊）"""
+    async def on_c2c_message_create(self, message: C2CMessage):
+        """处理私聊消息，仅 C2C 管理员可操作聊天广播白名单。"""
+        admin_ids = _config_manager.Get("AdminId", [])
+        if message.author.user_openid not in admin_ids:
+            return
+
+        handlers = [
+            C2C_AddChatAllowList,
+            C2C_RemoveChatAllowList,
+            C2C_ListChatAllowList,
+        ]
+        for handler in handlers:
+            if await handler(api=self.bot_api, message=message):
+                return
+
 
 class WsBotClient(BaseBotMixin, ymbotpy.Client):
     """定义 WebSocket 模式下的 Bot 客户端。"""
@@ -1115,10 +1190,17 @@ def _install_message_logger():
     original_post = BotAPI.post_group_message
 
     async def logged_post(self, group_openid="", msg_type=0, content="", **kwargs):
+        log_title = ""
+        log_content = content or ""
+        if msg_type == 2:
+            markdown = kwargs.get("markdown", {}) or {}
+            log_title = markdown.get("title", "") if isinstance(markdown, dict) else getattr(markdown, "title", "")
+            log_content = markdown.get("content", "") if isinstance(markdown, dict) else getattr(markdown, "content", "")
         LogSentMessage(
             group_openid=group_openid,
             msg_type=msg_type,
-            content=content or "",
+            content=log_content,
+            title=log_title,
         )
         return await original_post(
             self,

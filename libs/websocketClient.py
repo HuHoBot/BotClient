@@ -289,7 +289,7 @@ class WebsocketClient:
         try:
             while True:
                 await asyncio.sleep(5)
-                if self.ws is None or self.ws.closed:
+                if self.ws is None:
                     logger.warning("[Websocket] 心跳检测到连接已断开")
                     break
 
@@ -324,7 +324,7 @@ class WebsocketClient:
         """向当前 WebSocket 连接发送一条消息。"""
         if request_id is None:
             request_id = str(uuid.uuid4())
-        if self.ws is None or self.ws.closed:
+        if self.ws is None:
             logger.error("[Websocket] 连接不可用，无法发送消息")
             return False
 
@@ -361,7 +361,7 @@ class WebsocketClient:
 
     def IsActive(self):
         """判断当前 WebSocket 是否处于可用状态。"""
-        return self.ws is not None and not self.ws.closed
+        return self.ws is not None
 
     async def SendMsgByServerId(self, server_id, event_type: str, msg: dict, unique_id=None):
         """按服务器编号向服务端发送业务消息。"""
