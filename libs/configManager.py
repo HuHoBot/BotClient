@@ -20,7 +20,11 @@ class ConfigData(TypedDict):
     EnableMotd: bool
     EnableAuth: bool
     EnableSensitiveFilter: bool
+    AuditProvider: str
     AuditApiKey: str
+    OpenAIBaseUrl: str
+    OpenAIApiKey: str
+    OpenAIModel: str
     AdminId: list[str]
 
 
@@ -37,7 +41,11 @@ class ConfigManager:
     DEFAULT_ENABLE_AUTH = True
     DEFAULT_ENABLE_SENSITIVE_FILTER = True
     DEFAULT_GENERATE_IMG_URL = "http://127.0.0.1:2087/{IMGID}.png"
+    DEFAULT_AUDIT_PROVIDER = "uapi"
     DEFAULT_AUDIT_API_KEY = ""
+    DEFAULT_OPENAI_BASE_URL = ""
+    DEFAULT_OPENAI_API_KEY = ""
+    DEFAULT_OPENAI_MODEL = ""
     DEFAULT_ADMIN_ID = []
 
     def __init__(self, config_path: Optional[str] = None):
@@ -143,7 +151,11 @@ class ConfigManager:
             "EnableMotd": self._OptionalBool(data, "EnableMotd", self.DEFAULT_ENABLE_MOTD),
             "EnableAuth": self._OptionalBool(data, "EnableAuth", self.DEFAULT_ENABLE_AUTH),
             "EnableSensitiveFilter": self._OptionalBool(data, "EnableSensitiveFilter", self.DEFAULT_ENABLE_SENSITIVE_FILTER),
+            "AuditProvider": self._OptionalStringAllowEmpty(data, "AuditProvider", self.DEFAULT_AUDIT_PROVIDER),
             "AuditApiKey": self._OptionalStringAllowEmpty(data, "AuditApiKey", self.DEFAULT_AUDIT_API_KEY),
+            "OpenAIBaseUrl": self._OptionalStringAllowEmpty(data, "OpenAIBaseUrl", self.DEFAULT_OPENAI_BASE_URL),
+            "OpenAIApiKey": self._OptionalStringAllowEmpty(data, "OpenAIApiKey", self.DEFAULT_OPENAI_API_KEY),
+            "OpenAIModel": self._OptionalStringAllowEmpty(data, "OpenAIModel", self.DEFAULT_OPENAI_MODEL),
             "AdminId": self._OptionalStringList(data, "AdminId", self.DEFAULT_ADMIN_ID),
         }
 
@@ -174,7 +186,11 @@ class ConfigManager:
         enable_motd: Optional[bool] = None,
         enable_auth: Optional[bool] = None,
         enable_sensitive_filter: Optional[bool] = None,
+        audit_provider: Optional[str] = None,
         audit_api_key: Optional[str] = None,
+        openai_base_url: Optional[str] = None,
+        openai_api_key: Optional[str] = None,
+        openai_model: Optional[str] = None,
         admin_id: Optional[list[str]] = None,
     ) -> ConfigData:
         """保存配置到磁盘，并返回规范化后的配置对象。"""
@@ -195,7 +211,11 @@ class ConfigManager:
             "EnableMotd": enable_motd if enable_motd is not None else self.DEFAULT_ENABLE_MOTD,
             "EnableAuth": enable_auth if enable_auth is not None else self.DEFAULT_ENABLE_AUTH,
             "EnableSensitiveFilter": enable_sensitive_filter if enable_sensitive_filter is not None else self.DEFAULT_ENABLE_SENSITIVE_FILTER,
+            "AuditProvider": audit_provider if audit_provider is not None else self.DEFAULT_AUDIT_PROVIDER,
             "AuditApiKey": audit_api_key if audit_api_key is not None else self.DEFAULT_AUDIT_API_KEY,
+            "OpenAIBaseUrl": openai_base_url if openai_base_url is not None else self.DEFAULT_OPENAI_BASE_URL,
+            "OpenAIApiKey": openai_api_key if openai_api_key is not None else self.DEFAULT_OPENAI_API_KEY,
+            "OpenAIModel": openai_model if openai_model is not None else self.DEFAULT_OPENAI_MODEL,
             "AdminId": admin_id if admin_id is not None else list(self.DEFAULT_ADMIN_ID),
         })
 

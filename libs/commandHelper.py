@@ -103,7 +103,7 @@ class AuthCommandService:
         result = await CompareQQAvatars(app_id, qq_num, open_id)
         if result[1] != 0:
             await self.message.reply(
-                content=ApplySensitiveFilter(f'图像比对失败: 错误 ({result[1]}): {str(result[2])}\n管理员可手动使用"/认证 {qq_num} {open_id}"进行人工确认')
+                content=await ApplySensitiveFilter(f'图像比对失败: 错误 ({result[1]}): {str(result[2])}\n管理员可手动使用"/认证 {qq_num} {open_id}"进行人工确认')
             )
             return
 
@@ -296,7 +296,7 @@ async def BuildServerSelectorPayload(
         rows.append(KeyboardRow(buttons=buttons))
 
     server_list = "\n".join(server_list_lines)
-    markdown_content = ApplySensitiveFilter(f"{markdown_title}\n\n{server_list}")
+    markdown_content = await ApplySensitiveFilter(f"{markdown_title}\n\n{server_list}")
     return MarkdownPayload(content=markdown_content), KeyboardPayload(content=Keyboard(rows=rows))
 
 async def SendServerSelectorWithCallback(
@@ -330,7 +330,7 @@ async def SendServerSelectorWithCallback(
     return True
 
 
-def BuildServerActionPayload(server_id: str, server_name: str):
+async def BuildServerActionPayload(server_id: str, server_name: str):
     """构建服务器操作二级表单，包含重命名和解绑两个指令按钮。
 
     type=2 指令按钮：点击后自动在输入框插入 @bot data。
@@ -358,7 +358,7 @@ def BuildServerActionPayload(server_id: str, server_name: str):
             ),
         ]
     )
-    markdown = MarkdownPayload(content=ApplySensitiveFilter(f"# 操作服务器\n**{server_name}** ({server_id})"))
+    markdown = MarkdownPayload(content=await ApplySensitiveFilter(f"# 操作服务器\n**{server_name}** ({server_id})"))
     return markdown, KeyboardPayload(content=Keyboard(rows=[row]))
 
 

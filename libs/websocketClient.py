@@ -205,7 +205,11 @@ class WebsocketClient:
         """把服务端聊天广播回各群。"""
         server_id = body.get("serverId", "")
         msg = body.get("msg")
-        msgType = body.get("msgType","聊天")
+        if not isinstance(msg, str):
+            msg = str(msg) if msg is not None else ""
+        msgType = body.get("msgType", "聊天")
+        if not isinstance(msgType, str):
+            msgType = str(msgType)
         await ChatManager.BroadcastChat(server_id, msg, msgType)
 
     async def ProcessMessage(self, message):
@@ -243,7 +247,7 @@ class WebsocketClient:
             elif event_type == BotClientRecvEventSet.Chat:
                 await self.OnChat(request_id, body)
         except Exception as exc:
-            logger.error(f"[Websocket] 处理消息时异常: type={event_type}, error={exc}")
+            logger.exception(f"[Websocket] 处理消息时异常: type={event_type}")
 
     async def _SendShakeHand(self):
         """向服务端发送握手消息。"""

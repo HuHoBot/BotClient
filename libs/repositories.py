@@ -638,6 +638,19 @@ class ChatAllowListRepository:
             await session.Close()
         return True
 
+    async def GetByGroupId(self, group_id: str):
+        """按群号查询白名单记录，返回 (groupNum, qqNum) 或 None。"""
+        session = SQLiteSession(self.db_path)
+        await session.Connect()
+        try:
+            rows = await session.FetchAll(
+                "SELECT `groupNum`, `qqNum` FROM chatAllowList WHERE `groupId` = ?",
+                (group_id,),
+            )
+        finally:
+            await session.Close()
+        return rows[0] if rows else None
+
     async def GetAllAllowed(self):
         """获取所有聊天广播白名单记录，返回 (groupId, groupNum, qqNum) 列表。"""
         session = SQLiteSession(self.db_path)

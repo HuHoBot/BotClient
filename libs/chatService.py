@@ -8,7 +8,7 @@ from ymbotpy.message import GroupMessage
 from ymbotpy.types.message import MarkdownPayload
 
 from libs.repositories import BindRepositoryInstance, ChatAllowListRepositoryInstance
-from libs.SensitiveFilter import ApiSensitiveFilter
+from libs.SensitiveFilter import ApiSensitiveFilter, current_audit_group_id
 from libs.configManager import ConfigManager
 from libs.generateImg import generate_img
 from libs.markdownManager import mdManager
@@ -23,10 +23,10 @@ _log = logging.get_logger()
 _config_manager = ConfigManager()
 
 
-def ApplySensitiveFilter(text: str) -> str:
+async def ApplySensitiveFilter(text: str) -> str:
     """按配置决定是否对文本执行敏感词替换。"""
     if _config_manager.Get("EnableSensitiveFilter", ConfigManager.DEFAULT_ENABLE_SENSITIVE_FILTER):
-        return ApiSensitiveFilter.replace(text)
+        return await ApiSensitiveFilter.replace(text)
     return text
 
 
@@ -61,7 +61,7 @@ class MessageReplyService:
 
     async def PostSensitiveMessage(self, text: str, msg_seq=1):
         """发送经过敏感词过滤的文本回复。"""
-        return await self.message.reply(content=ApplySensitiveFilter(text), msg_seq=msg_seq)
+        return await self.message.reply(content=await ApplySensitiveFilter(text), msg_seq=msg_seq)
 
     async def ReplyText(self, text: str, msg_seq=1, use_sensitive_filter=False):
         """按需发送原文或过滤后的文本。"""
@@ -95,14 +95,15 @@ class MessageReplyService:
                 error_prefix=error_prefix,
             )
 
-    def _BuildCallbackMarkdown(self, content: str, img_url: str, img_width=0, img_height=0) -> str:
+    async def _BuildCallbackMarkdown(self, content: str, img_url: str, img_width=0, img_height=0) -> str:
         """按 callback.md 模板组装带图命令回调 Markdown。"""
+        filtered = await ApplySensitiveFilter(content)
         return mdManager.GetTemplate(CALLBACK_MARKDOWN_TEMPLATE).get(
             {
                 "width": img_width or 0,
                 "height": img_height or 0,
                 "image_url": img_url,
-                "content": ApplySensitiveFilter(content),
+                "content": filtered,
             }
         )
 
@@ -123,7 +124,7 @@ class MessageReplyService:
             return
 
         try:
-            md_content = self._BuildCallbackMarkdown(content, img_url, img_width, img_height)
+            md_content = await self._BuildCallbackMarkdown(content, img_url, img_width, img_height)
             md_payload = MarkdownPayload(content=md_content)
             await self.api.post_group_message(
                 group_openid=self.message.group_openid,
@@ -218,11 +219,14 @@ class ChatRelayManager:
         if self._bot_api is None:
             return False
 
-        content = f"{CHAT_MESSAGE_PREFIX.replace("{msgType}", msgType)}\n{ApplySensitiveFilter(msg)}"
+        bindings = await BindRepositoryInstance.GetByServerId(server_id)
+        group_ids = [row[0] for row in bindings] if bindings else []
+        current_audit_group_id.set(",".join(group_ids) if group_ids else f"broadcast:{server_id}")
+        filtered_msg = await ApplySensitiveFilter(msg)
+        content = f"{CHAT_MESSAGE_PREFIX.replace("{msgType}", msgType)}\n{filtered_msg}"
 
         # 1) 第一遍：遍历绑定群直接发送，失败收集到重试列表
         failed_groups: list[str] = []
-        bindings = await BindRepositoryInstance.GetByServerId(server_id)
         if bindings:
             for row in bindings:
                 group_id = row[0]

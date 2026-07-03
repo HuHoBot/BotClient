@@ -6,10 +6,14 @@ import re
 import contextvars
 from datetime import datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 LOG_DIR = "data"
 LOG_FILE_PREFIX = "message_log"
 MAX_RETENTION_DAYS = 14
+
+# 定义固定的 UTC+8 时区
+SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
 
 # msg_type 数字 → 文本描述
 _MSG_TYPE_TEXT: dict[int, str] = {
@@ -29,7 +33,7 @@ current_server_id: contextvars.ContextVar = contextvars.ContextVar(
 
 def _today_log_path() -> str:
     """返回当天日志文件的完整路径。"""
-    today = datetime.now().strftime("%Y-%m-%d")
+    today = datetime.now(SHANGHAI_TZ).strftime("%Y-%m-%d")
     return os.path.join(LOG_DIR, f"{LOG_FILE_PREFIX}_{today}.csv")
 
 
@@ -43,7 +47,7 @@ def CleanOldMessages(max_days: int = MAX_RETENTION_DAYS) -> None:
     if not os.path.isdir(LOG_DIR):
         return
 
-    cutoff = datetime.now() - timedelta(days=max_days)
+    cutoff = datetime.now(SHANGHAI_TZ) - timedelta(days=max_days)
     pattern = re.compile(rf"^{re.escape(LOG_FILE_PREFIX)}_(\d{{4}}-\d{{2}}-\d{{2}})\.csv$")
 
     for filename in os.listdir(LOG_DIR):
@@ -65,6 +69,8 @@ def LogSentMessage(
     content: str = "",
     title: str = "",
     server_id: str = "",
+    group_num: str = "",
+    qq_num: str = "",
 ) -> None:
     """追加一条机器人发往群的消息记录到当天 CSV 文件。"""
     _ensure_dir()
@@ -78,6 +84,12 @@ def LogSentMessage(
             server_id = current_server_id.get()
         except LookupError:
             pass
+
+    # 聊天白名单群：记录实际群号和联系人，替代 OpenId
+    if group_num or qq_num:
+        group_label = f"群号:{group_num},联系人{qq_num}"
+    else:
+        group_label = group_openid
 
     # 组合 title 和 content，用于 msg_type=2 (Markdown) 等场景
     if title and content:
@@ -96,8 +108,8 @@ def LogSentMessage(
             if not file_exists:
                 writer.writerow(["时间", "群ID", "ServerId", "消息类型", "消息内容"])
             writer.writerow([
-                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                group_openid,
+                datetime.now(SHANGHAI_TZ).strftime("%Y-%m-%d %H:%M:%S"),
+                group_label,
                 server_id,
                 _MSG_TYPE_TEXT.get(msg_type, str(msg_type)),
                 content_safe,

@@ -8,6 +8,7 @@ from ymbotpy.message import GroupMessage
 from ymbotpy.types.message import MarkdownPayload, MessageMarkdownParams
 
 from libs.basic import SplitCommandParams
+from libs.SensitiveFilter import current_audit_group_id
 from libs.chatService import ApplySensitiveFilter, MessageReplyService
 from libs.configManager import ConfigManager
 from libs.markdownManager import mdManager
@@ -113,7 +114,7 @@ class MotdClient:
         cleaned_text = re.sub(r"§.", "", text)
         return re.sub(r"\s+", " ", cleaned_text.strip())
 
-    def _BuildMarkdownParams(
+    async def _BuildMarkdownParams(
         self,
         platform="基岩版",
         motd_img_url="",
@@ -126,8 +127,8 @@ class MotdClient:
         game_mode="Unknown",
     ):
         """组装 Motd Markdown 模板所需参数。"""
-        motd_text = ApplySensitiveFilter(motd_text)
-        level_name = ApplySensitiveFilter(level_name)
+        motd_text = await ApplySensitiveFilter(motd_text)
+        level_name = await ApplySensitiveFilter(level_name)
         return [
             MessageMarkdownParams(key="platform", values=[platform]),
             MessageMarkdownParams(key="motd_img_url", values=[motd_img_url]),
@@ -164,7 +165,7 @@ class MotdClient:
             f"默认模式: {game_mode}"
         )
 
-    def _BuildBedrockResponse(self, motd_raw: dict) -> dict:
+    async def _BuildBedrockResponse(self, motd_raw: dict) -> dict:
         """把基岩版返回结果转成模板参数。"""
         server_data = motd_raw.get("serverData")
         pure_motd = server_data.get("pureMotd", "").replace(".", "·")
@@ -176,7 +177,7 @@ class MotdClient:
         player = f"{server_data.get('players').get('online', -1)}/{server_data.get('players').get('max', -1)}"
         level_name = server_data.get("levelname", "world").replace(".", "·")
         game_mode = server_data.get("gamemode", "Unknown")
-        markdown_params = self._BuildMarkdownParams(
+        markdown_params = await self._BuildMarkdownParams(
             platform="Bedrock",
             motd_img_url=img_url,
             motd_text=motd_text,
@@ -203,7 +204,7 @@ class MotdClient:
             ),
         }
 
-    def _BuildJavaResponse(self, motd_raw: dict) -> dict:
+    async def _BuildJavaResponse(self, motd_raw: dict) -> dict:
         """把 Java 版返回结果转成模板参数。"""
         server_data = motd_raw.get("serverData")
         pure_motd = server_data.get("pureMotd", "").replace(".", "·")
@@ -213,7 +214,7 @@ class MotdClient:
         protocol = server_data.get("protocol", -1)
         version = server_data.get("version", "0.0.0")
         player = f"{server_data.get('players').get('online', -1)}/{server_data.get('players').get('max', -1)}"
-        markdown_params = self._BuildMarkdownParams(
+        markdown_params = await self._BuildMarkdownParams(
             platform="Java",
             motd_img_url=img_url,
             motd_text=motd_text,
@@ -240,7 +241,7 @@ class MotdClient:
             ),
         }
 
-    def SendRequest(self, url: str):
+    async def SendRequest(self, url: str):
         """发送已组装好的请求地址，并规范化返回结构。"""
         motd_raw = self._Request(url)
         server_data = motd_raw.get("serverData", {"status": "offline"})
@@ -250,15 +251,15 @@ class MotdClient:
 
         platform = server_data.get("type")
         if platform == "Java":
-            return self._BuildJavaResponse(motd_raw)
+            return await self._BuildJavaResponse(motd_raw)
         if platform == "Bedrock":
-            return self._BuildBedrockResponse(motd_raw)
+            return await self._BuildBedrockResponse(motd_raw)
         return {"online": False}
 
-    def Motd(self, platform="auto") -> dict:
+    async def Motd(self, platform="auto") -> dict:
         """按平台查询当前服务器地址的 Motd 数据。"""
         url = GetIframeImgUrl().format(SERVERHOST=self.url, PLATFORM=platform)
-        return self.SendRequest(url)
+        return await self.SendRequest(url)
 
 
 class MotdCommandService:
@@ -313,7 +314,7 @@ class MotdCommandService:
     async def _SendMarkdownCustomMessage(self, content: str, params):
         """发送自定义的 Markdown 群消息。"""
         md_content = mdManager.Render(content, params)
-        md_payload = MarkdownPayload(content=ApplySensitiveFilter(md_content))
+        md_payload = MarkdownPayload(content=await ApplySensitiveFilter(md_content))
         await self._PostMarkdownMessage(md_payload)
 
     def _BuildOnlineSpecialTip(self, url: str, tip_text: str) -> str:
@@ -322,9 +323,9 @@ class MotdCommandService:
             return f"({tip_text})\n"
         return ""
 
-    def _BuildOnlinePlayerMarkdownList(self, player: str) -> str:
+    async def _BuildOnlinePlayerMarkdownList(self, player: str) -> str:
         """把逗号分隔的玩家名格式化为 Markdown 列表。"""
-        filtered_player = ApplySensitiveFilter(player)
+        filtered_player = await ApplySensitiveFilter(player)
         player_names = [name.strip() for name in filtered_player.split(",") if name.strip()]
         if not player_names:
             return filtered_player
@@ -338,11 +339,12 @@ class MotdCommandService:
 
         try:
             upload_media = await self.api.post_group_file(self.message.group_openid, 1, img_url, False)
+            filtered_content = await ApplySensitiveFilter(content)
             await self.api.post_group_message(
                 group_openid=self.message.group_openid,
                 msg_type=7,
                 msg_id=self.message.id,
-                content=ApplySensitiveFilter(content),
+                content=filtered_content,
                 media=upload_media,
                 msg_seq=2,
             )
@@ -350,13 +352,13 @@ class MotdCommandService:
             _log.error(f"{error_prefix}: {exc}")
             await self.reply_service.PostSensitiveMessage(f"(图片上传失败)\n{content}", msg_seq=2)
 
-    def _BuildOnlineMarkdownParams(self, server_name: str, online_num: str, img_url: str, player: str):
+    async def _BuildOnlineMarkdownParams(self, server_name: str, online_num: str, img_url: str, player: str):
         """组装查在线 Markdown 所需参数。"""
         return [
-            MessageMarkdownParams(key="server", values=[ApplySensitiveFilter(server_name)]),
+            MessageMarkdownParams(key="server", values=[await ApplySensitiveFilter(server_name)]),
             MessageMarkdownParams(key="online_num", values=[online_num]),
             MessageMarkdownParams(key="img_url", values=[img_url]),
-            MessageMarkdownParams(key="player", values=[self._BuildOnlinePlayerMarkdownList(player)]),
+            MessageMarkdownParams(key="player", values=[await self._BuildOnlinePlayerMarkdownList(player)]),
         ]
 
     async def _SendOnlineMarkdownResult(
@@ -368,9 +370,9 @@ class MotdCommandService:
         custom_markdown=None,
     ):
         """把查在线结果发送为 Markdown 消息，支持自定义 Markdown 内容。"""
-        md_params = self._BuildOnlineMarkdownParams(server_name, online_num, img_url, player)
-        if custom_markdown is not None and str(custom_markdown).strip():
-            await self._SendMarkdownCustomMessage(str(custom_markdown), md_params)
+        md_params = await self._BuildOnlineMarkdownParams(server_name, online_num, img_url, player)
+        if isinstance(custom_markdown, str) and custom_markdown.strip():
+            await self._SendMarkdownCustomMessage(custom_markdown, md_params)
             return
 
         await self._SendMarkdownMessage("onlineList", md_params)
@@ -387,6 +389,7 @@ class MotdCommandService:
 
     async def HandleOnlineCallback(self, data: dict):
         """处理服务端回传的在线玩家查询结果。"""
+        current_audit_group_id.set(self.message.group_openid)
         try:
             reply_text = data.get("msg", "").replace("\u200b", "\n")
             motd_address = data.get("url", "")
@@ -418,7 +421,7 @@ class MotdCommandService:
                         )
                         return
                     except Exception as exc:
-                        _log.error(f"查在线Markdown发送失败: {exc}")
+                        _log.exception("查在线Markdown发送失败")
 
                 await self._SendOnlineTextResult(player_text, proxy_img_url, "查在线图片上传失败")
                 return
@@ -475,11 +478,12 @@ class MotdCommandService:
 
         try:
             upload_media = await self.api.post_group_file(self.message.group_openid, 1, img_url, False)
+            filtered_text = await ApplySensitiveFilter(text)
             await self.api.post_group_message(
                 group_openid=self.message.group_openid,
                 msg_type=7,
                 msg_id=self.message.id,
-                content=ApplySensitiveFilter(text),
+                content=filtered_text,
                 media=upload_media,
                 msg_seq=2,
             )
@@ -527,7 +531,7 @@ class MotdCommandService:
             await self.message.reply(content="服务器地址参数不正确", msg_seq=2)
             return
 
-        motd_data = motd_client.Motd(platform)
+        motd_data = await motd_client.Motd(platform)
         if not motd_data.get("online"):
             await self.message.reply(content=MOTD_OFFLINE_FAILED_TEXT, msg_seq=2)
             return

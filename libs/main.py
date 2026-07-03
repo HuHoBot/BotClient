@@ -13,9 +13,11 @@ from libs.command_util import Commands
 from ymbotpy.interaction import Interaction
 from ymbotpy.manage import GroupManageEvent
 from ymbotpy.message import C2CMessage, GroupMessage, MessageAudit
+from ymbotpy.types.message import MarkdownPayload
 
-from libs.basic import (ExtractMentionId, GenerateRandomCode, GetQLogoUrl, IsValidServerId, IsNumber,
-                        SplitCommandParams, TryParseJson, )
+from libs.basic import (ExtractMentionId, GenerateRandomCode, GetQLogoUrl, IsNumber,
+                        IsValidServerId, SplitCommandParams, TryParseJson, )
+from libs.SensitiveFilter import current_audit_group_id
 from libs.chatService import ApplySensitiveFilter, ChatManager, COMMAND_CALLBACK_PREFIX, MessageReplyService
 from libs.commandHelper import (
     AuthCommandService,
@@ -195,7 +197,7 @@ async def Bind(api: BotAPI, message: GroupMessage, params=None):
             server_name = await BindRepositoryInstance.GetServerName(message.group_openid, server_id) or "未命名服务器"
             lines.append(f"名称: {server_name}")
             lines.append(f"ID: {server_id}")
-        await message.reply(content=ApplySensitiveFilter("\n".join(lines)))
+        await message.reply(content=await ApplySensitiveFilter("\n".join(lines)))
         return True
 
     if len(params_list) < 1 or len(params_list) > 2:
@@ -301,7 +303,7 @@ async def SetServer(api: BotAPI, message: GroupMessage, params=None):
 
     async def send_action_form(server_id: str):
         server_name = await BindRepositoryInstance.GetServerName(message.group_openid, server_id) or "未命名服务器"
-        markdown, keyboard = BuildServerActionPayload(server_id, server_name)
+        markdown, keyboard = await BuildServerActionPayload(server_id, server_name)
         await api.post_group_message(
             group_openid=message.group_openid,
             msg_type=2,
@@ -357,7 +359,7 @@ async def RenameServer(api: BotAPI, message: GroupMessage, params=None):
         return True
 
     await BindRepositoryInstance.SetServerName(message.group_openid, server_id, name)
-    await message.reply(content=f"已将该服务器重命名为: {ApplySensitiveFilter(name)}")
+    await message.reply(content=f"已将该服务器重命名为: {await ApplySensitiveFilter(name)}")
     return True
 
 
@@ -553,7 +555,7 @@ async def SendCommand(api: BotAPI, message: GroupMessage, params=None):
             try:
                 text = packed_msg.get("text", "")
                 callback_convert = packed_msg.get("callbackConvert", 0)
-                filtered_text = ApplySensitiveFilter(text)
+                filtered_text = await ApplySensitiveFilter(text)
                 content, image_url, width, height = reply_service.BuildCommandCallbackPayload(
                     text, unique_id, callback_convert, render_text=filtered_text
                     )
@@ -719,12 +721,12 @@ async def CustomRun(is_admin: bool, api: BotAPI, message: GroupMessage, params=N
                 msg_continue = is_dict and parsed_data.get("msgContinue", False)
 
                 if is_dict:
-                    content = f"{COMMAND_CALLBACK_PREFIX}\n{ApplySensitiveFilter(parsed_data.get('text', '无消息'))}"
+                    content = f"{COMMAND_CALLBACK_PREFIX}\n{await ApplySensitiveFilter(parsed_data.get('text', '无消息'))}"
                     image_url = parsed_data.get("imgUrl")
                     width = parsed_data.get("width", parsed_data.get("imgWidth", 0))
                     height = parsed_data.get("height", parsed_data.get("imgHeight", 0))
                 else:
-                    filtered_text = ApplySensitiveFilter(text)
+                    filtered_text = await ApplySensitiveFilter(text)
                     content, image_url, width, height = reply_service.BuildCommandCallbackPayload(
                         text,
                         unique_id,
@@ -933,15 +935,31 @@ async def C2C_RemoveChatAllowList(api: BotAPI, message: C2CMessage, params=None)
 @Commands("查看聊天白")
 async def C2C_ListChatAllowList(api: BotAPI, message: C2CMessage, params=None):
     """C2C: 查看当前聊天广播白名单。"""
+    param_list = SplitCommandParams(params)
+
+    # 指定 OpenId → 只查单条
+    if param_list:
+        target_id = param_list[0]
+        row = await ChatAllowListRepositoryInstance.GetByGroupId(target_id)
+        if not row:
+            await message.reply(content=f"未找到 OpenId {target_id} 的白名单记录。")
+            return True
+        gnum, qq = row[0] or "-", row[1] or "-"
+        md = MarkdownPayload(content=f"# 聊天广播白名单\n- **OpenId**: {target_id}\n- **数字群号**: {gnum}\n- **联系人QQ**: {qq}")
+        await api.post_c2c_message(openid=message.author.user_openid, msg_type=2, markdown=md)
+        return True
+
+    # 无参数 → 列出全部
     rows = await ChatAllowListRepositoryInstance.GetAllAllowed()
     if not rows:
         await message.reply(content="当前聊天广播白名单为空。")
         return True
-    lines = ["当前聊天广播白名单:"]
-    for row in rows:
+    lines = ["# 聊天广播白名单", ""]
+    for i, row in enumerate(rows, 1):
         gid, gnum, qq = row[0], row[1] or "-", row[2] or "-"
-        lines.append(f"groupId: {gid}  数字群号: {gnum}  qqNum: {qq}")
-    await message.reply(content="\n".join(lines))
+        lines.append(f"{i}. **OpenId**: {gid}  群号: {gnum}  qq: {qq}")
+    md = MarkdownPayload(content="\n".join(lines))
+    await api.post_c2c_message(openid=message.author.user_openid, msg_type=2, markdown=md)
     return True
 
 
@@ -980,6 +998,7 @@ class BaseBotMixin:
     """群消息事件 AT 事件"""
     async def on_group_at_message_create(self, message: GroupMessage):
         """分发群聊命令，并在未命中时转入自定义执行。"""
+        current_audit_group_id.set(message.group_openid)
         ChatManager.SetBotApi(self.bot_api)
         handlers = [
             GetHelp,
@@ -1082,6 +1101,7 @@ class BaseBotMixin:
 
         result code: 0 成功 1 失败 2 频繁 3 重复 4 无权限 5 仅管理员
         """
+        current_audit_group_id.set(interaction.group_openid)
         try:
             interaction_data = interaction.data
             resolved = interaction_data.resolved
@@ -1196,11 +1216,22 @@ def _install_message_logger():
             markdown = kwargs.get("markdown", {}) or {}
             log_title = markdown.get("title", "") if isinstance(markdown, dict) else getattr(markdown, "title", "")
             log_content = markdown.get("content", "") if isinstance(markdown, dict) else getattr(markdown, "content", "")
+
+        # 聊天白名单群：查询实际群号和联系人
+        group_num = ""
+        qq_num = ""
+        row = await ChatAllowListRepositoryInstance.GetByGroupId(group_openid)
+        if row:
+            group_num = row[0] or ""
+            qq_num = row[1] or ""
+
         LogSentMessage(
             group_openid=group_openid,
             msg_type=msg_type,
             content=log_content,
             title=log_title,
+            group_num=group_num,
+            qq_num=qq_num,
         )
         return await original_post(
             self,
