@@ -3,6 +3,7 @@
 import re
 
 import requests
+import random
 from ymbotpy import BotAPI, logging
 from ymbotpy.message import GroupMessage
 from ymbotpy.types.message import MarkdownPayload, MessageMarkdownParams
@@ -61,17 +62,18 @@ def ResolveMotdProxyImgUrl(img_url: str) -> str:
     """按配置把 Motd 图片地址替换为代理地址。"""
     origin_url = GetMotdOriginUrl()
     proxy_url = GetMotdProxyUrl()
-    if not (origin_url and proxy_url and origin_url in img_url and "/api/app_img?" in img_url):
+    if not (origin_url and proxy_url and ((origin_url in img_url) or (proxy_url in img_url)) and "/api/app_img?" in img_url):
         return img_url
 
     try:
-        return img_url.replace(
+        imgUrlProxy = img_url.replace(
             f"https://{origin_url}",
             proxy_url.rstrip("/"),
         ).replace(
             f"http://{origin_url}",
             proxy_url.rstrip("/"),
         )
+        return imgUrlProxy+"&"+str(random.randint(1000, 9999))
     except Exception as exc:
         _log.error(f"Motd 图片代理地址转换失败: {exc}")
         return img_url

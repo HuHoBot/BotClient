@@ -220,30 +220,38 @@ class ChatRelayManager:
             return False
 
         bindings = await BindRepositoryInstance.GetByServerId(server_id)
-        group_ids = [row[0] for row in bindings] if bindings else []
-        current_audit_group_id.set(",".join(group_ids) if group_ids else f"broadcast:{server_id}")
+        if not bindings:
+            return False
+
+        # 提前过滤允许列表，没有目标群则跳过审核直接返回
+        allowed_groups: list[str] = []
+        for row in bindings:
+            group_id = row[0]
+            if await ChatAllowListRepositoryInstance.IsAllowed(group_id):
+                allowed_groups.append(group_id)
+
+        if not allowed_groups:
+            return False
+
+        current_audit_group_id.set(",".join(allowed_groups))
         filtered_msg = await ApplySensitiveFilter(msg)
         content = f"{CHAT_MESSAGE_PREFIX.replace("{msgType}", msgType)}\n{filtered_msg}"
 
-        # 1) 第一遍：遍历绑定群直接发送，失败收集到重试列表
+        # 1) 第一遍：遍历允许群直接发送，失败收集到重试列表
         failed_groups: list[str] = []
-        if bindings:
-            for row in bindings:
-                group_id = row[0]
-                if not await ChatAllowListRepositoryInstance.IsAllowed(group_id):
-                    continue
-                try:
-                    await self._bot_api.post_group_message(
-                        group_openid=group_id,
-                        content=content,
-                    )
-                except Exception as e:
-                    #_log.error(f"群 {group_id} 发送失败: {e}")
-                    failed_groups.append(group_id)
+        for group_id in allowed_groups:
+            try:
+                await self._bot_api.post_group_message(
+                    group_openid=group_id,
+                    content=content,
+                )
+            except Exception as e:
+                #_log.error(f"群 {group_id} 发送失败: {e}")
+                failed_groups.append(group_id)
 
         # 2) 第二遍：对失败群走缓存重试逻辑
         if not failed_groups or server_id not in self._message_cache:
-            return len(failed_groups) < len(bindings) if bindings else False
+            return len(failed_groups) < len(allowed_groups)
 
         sent = False
         now = time.time()

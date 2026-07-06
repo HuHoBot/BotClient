@@ -211,15 +211,20 @@ class ApiSensitiveFilter:
         return cls._openai_client
 
     OPENAI_SYSTEM_PROMPT = (
-        "你是一个敏感词过滤工具。你的任务是对用户输入的文本进行检测，"
-        "将其中所有违禁词、敏感词用等量的星号（*）替换，"
-        "然后只输出替换后的完整文本。"
-        "不要添加任何解释、备注或额外的文字，只输出处理后的最终结果。"
+        "你是一个严格的敏感词过滤工具。请按以下规则处理用户输入的文本："
+        "1. 检测文本中所有属于以下类别的词语（包括变体、谐音、缩写、拆字、拼音替代等）："
+        " - 政治敏感词（涉及国家、政党、领导人、历史事件等的违禁表述）"
+        " - 脏话及粗俗用语"
+        " - 人身攻击、侮辱性词汇"
+        " - 色情、低俗内容"
+        "2. 对每一个检测到的敏感词，用与其字符数等量的星号（）进行替换（例如，“敏感词”替换为“”）。"
+        "3. 输出时只**输出替换后的完整文本，不要添加任何解释、备注、说明、前缀、后缀或额外字符。"
+        "4. 如果文本中没有任何敏感词，则原样输出该文本。"
     )
 
     @classmethod
     def _do_openai_call_sync(cls, text: str) -> str | None:
-        """同步执行 OpenAI API 调用（在线程池中运行）。"""
+        """同步执行 OpenAI API 调用。每次独立请求，system prompt 相同 → 前缀缓存自动命中。"""
         client = cls._get_openai_client()
         model = _config_manager.Get("OpenAIModel", ConfigManager.DEFAULT_OPENAI_MODEL)
         response = client.chat.completions.create(
@@ -228,8 +233,9 @@ class ApiSensitiveFilter:
                 {"role": "system", "content": cls.OPENAI_SYSTEM_PROMPT},
                 {"role": "user", "content": f'请处理以下文本："{text}"'},
             ],
-            max_tokens=512,
+            max_tokens=1024,
             temperature=0.1,
+            extra_body={"thinking": {"type": "disabled"}},
         )
         return response.choices[0].message.content.strip()
 
