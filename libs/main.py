@@ -501,19 +501,15 @@ async def SendGameMessage(api: BotAPI, message: GroupMessage, params=None):
         return True
 
     # 全量转发模式下消息已自动转发，静默跳过
-    if await FullAmountRepositoryInstance.IsEnabled(message.group_openid):
-        return True
-
+    isFull = await FullAmountRepositoryInstance.IsEnabled(message.group_openid)
     nick = await NicknameRepositoryInstance.GetName(message.group_openid, message.author.member_openid)
-    if nick is None:
+    if nick is None and not isFull:
         await message.reply(content="没有找到你的昵称数据，请使用/设置名称 <昵称>来设置")
         return True
 
-    #server_id = bind_server[1]
-
     unique_id = str(uuid.uuid4())
 
-    async def run(server_id:str):
+    async def run(server_id:str, _msg_seq=1):
         current_server_id.set(server_id)
         ChatManager.SetBotApi(api)
         ChatManager.RememberMessage(server_id, message.group_openid, message.id, 1)
@@ -527,12 +523,19 @@ async def SendGameMessage(api: BotAPI, message: GroupMessage, params=None):
                 str(uuid.uuid4()),
             )
             if not ws_ret:
-                await message.reply(content=BuildWsSendFailedText(server_id))
+                await message.reply(content=BuildWsSendFailedText(server_id),msg_seq=_msg_seq)
 
-    if len(bind_server) == 1:
-        await run(bind_server[0])
-    elif len(bind_server) > 1:
-        await SendServerSelectorWithCallback(api, message, unique_id, False, run)
+    if isFull:
+        i=0
+        while i < len(bind_server) and i < 4:
+            server_id = bind_server[i]
+            await run(server_id,i+1)
+            i+=1
+    else:
+        if len(bind_server) == 1:
+            await run(bind_server[0])
+        elif len(bind_server) > 1:
+            await SendServerSelectorWithCallback(api, message, unique_id, False, run)
     return True
 
 
@@ -1048,7 +1051,8 @@ class BaseBotMixin:
                 return
 
         # 全量模式：本群开启全量转发后，未匹配指令的消息自动发送到游戏
-        if await FullAmountRepositoryInstance.IsEnabled(message.group_openid):
+        isFull = await FullAmountRepositoryInstance.IsEnabled(message.group_openid)
+        if isFull:
             clean_content = re.sub(r'<@!?[^>]+>', '', message.content).strip().lstrip('/').strip()
             if clean_content:
                 await SendGameMessage.__wrapped__(
